@@ -1,0 +1,36 @@
+name: Expand CDK source tree
+
+on:
+  push:
+    paths:
+      - .github/workflows/expand-source.yml
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  expand:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Expand verified source package
+        shell: bash
+        run: |
+          set -euo pipefail
+          expected='a2105cb9db5f03aded94ff2773df7f5b7f47f3d59158ec7eb95769f8d1c6dbc2'
+          actual="$(sha256sum smartkey-source-clean-1.4.19-20260921.zip | awk '{print $1}')"
+          test "$actual" = "$expected"
+          mkdir .source
+          unzip -q smartkey-source-clean-1.4.19-20260921.zip -d .source
+          test -f .source/smartkey/backend/go.mod
+          test -f .source/smartkey/frontend/package.json
+          cp -a .source/smartkey/. .
+          rm -rf .source
+          rm -f smartkey-source-clean-1.4.19-20260921.zip SHA256SUMS.txt
+          rm -f .github/workflows/expand-source.yml
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add -A
+          git commit -m 'Expand clean CDK source tree'
+          git push
