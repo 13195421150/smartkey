@@ -1,0 +1,11 @@
+{
+  "extends": "./tsconfig.portal.json",
+  "include": [
+    "src/components/CardPoolDiagnostics.vue",
+    "src/views/admin/CardSelectionConfig.vue",
+    "src/views/admin/CDKeyManagement.vue",
+    "src/lib/issue-request.ts",
+    "src/lib/__tests__/card-pool.test.ts",
+    "src/lib/__tests__/issue-request.test.ts"
+  ]
+}

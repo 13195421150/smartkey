@@ -1,0 +1,927 @@
+<template>
+  <div class="portal-view">
+    <div class="portal-view-inner">
+      <RedeemModeTabs />
+
+      <ol class="redemption-steps" aria-label="兑换步骤">
+        <li v-for="(label, i) in steps" :key="label" :class="{ active: step === i + 1, done: step > i + 1 }" :aria-current="step === i + 1 ? 'step' : undefined">
+          <span>{{ step > i + 1 ? '✓' : i + 1 }}</span><b>{{ label }}</b>
+        </li>
+      </ol>
+
+      <form v-show="step === 1" class="card redeem-stage space-y-4" @submit.prevent="doPreview" :aria-busy="busy">
+        <div class="redeem-intro">
+          <div><span class="step-overline">LET’S GET STARTED</span><h2>从一张卡密开始</h2><p>粘贴完整卡密，我们会为你识别对应的套餐。</p></div>
+          <span class="redeem-intro-icon"><Key aria-hidden="true" /></span>
+        </div>
+        <div class="redeem-code-field">
+          <div class="redeem-code-label"><label for="redeem-code">CDK 卡密</label><button type="button" class="portal-inline-link" @click="pasteCode" :disabled="busy">粘贴卡密</button></div>
+          <input id="redeem-code" v-model="code" class="input mono redeem-code-input" placeholder="粘贴 PLUS- / Pro5X- / Pro20X- 完整卡密" autocomplete="off" spellcheck="false" :aria-invalid="!!error" :aria-describedby="error ? 'code-hint code-error' : 'code-hint'" :disabled="busy" />
+          <p id="code-hint" class="redeem-field-hint">原 ZC- 卡密仍可使用。验证不会提交充值订单。</p>
+        </div>
+        <div v-if="error" id="code-error" class="alert alert-error" role="alert">{{ error }}</div>
+        <button type="submit" class="btn-primary w-full" :disabled="busy || !code.trim()"><span v-if="busy" class="spinner mr-2" aria-hidden="true"></span>{{ busy ? '正在验证卡密…' : '验证卡密，继续' }} <span v-if="!busy" aria-hidden="true">→</span></button>
+        <div class="portal-inline-action"><span>已有兑换记录？</span><router-link to="/history" class="app-link">查询兑换进度 <span aria-hidden="true">↗</span></router-link></div>
+      </form>
+
+      <!-- 2 preflight -->
+      <div v-show="step === 2" class="card redeem-stage space-y-4">
+        <h2 class="text-xl font-bold text-ink">准备你的账号信息</h2>
+        <p class="text-sm text-muted">目标套餐：<strong>{{ planLabel(targetPlan) }}</strong>。请确认浏览器登录的是需要充值的账号。</p>
+        <p class="text-sm text-muted">打开
+          <a class="app-link" href="https://chatgpt.com/api/auth/session" target="_blank" rel="noopener">chatgpt.com/api/auth/session</a>
+          复制<strong>完整 JSON</strong>（必须含 <code>sessionToken</code>）。已禁用纯 Access Token。
+        </p>
+        <label for="redeem-session" class="block text-sm font-semibold text-ink">完整 Session 内容</label>
+        <textarea id="redeem-session" spellcheck="false" autocomplete="off" v-model="sessionRaw" class="input h-36 font-mono text-xs" placeholder='{"user":{...},"accessToken":"eyJ...","sessionToken":"eyJ...五段JWE..."}' />
+        <div v-if="error" class="alert alert-error" role="alert">{{ error }}</div>
+        <div class="flex gap-3">
+          <button class="btn-secondary flex-1" :disabled="busy" @click="step = 1">上一步</button>
+          <button class="btn-primary flex-1" :disabled="busy" @click="doPreflight">{{ busy ? '正在校验账号…' : '校验账号信息' }}</button>
+        </div>
+      </div>
+
+      <!-- 3 redeem -->
+      <div v-show="step === 3" class="card redeem-stage space-y-4">
+        <h2 class="text-xl font-bold text-ink">确认兑换</h2>
+        <p class="text-sm text-muted">请核对下面的邮箱与目标套餐。提交后，可在当前页面持续查看处理进度。</p>
+
+        <!-- 与卡台直充预检一致：邮箱 + 订阅事实 -->
+        <div v-if="account.checked" class="rounded-xl border p-4 space-y-3" style="border-color: var(--brd); background: var(--surface-2, var(--soft))">
+          <div class="flex flex-wrap items-center gap-2">
+            <strong class="text-ink text-base">{{ account.email || '账号已验证' }}</strong>
+            <el-tag size="small" :type="subscriptionStatusTag">{{ subscriptionStatusText }}</el-tag>
+          </div>
+          <dl class="account-facts">
+            <div>
+              <dt>目标套餐</dt>
+              <dd>{{ planLabel(targetPlan) }}</dd>
+            </div>
+            <div>
+              <dt>当前套餐</dt>
+              <dd>{{ planLabel(account.currentPlan) }}</dd>
+            </div>
+            <div>
+              <dt>订阅状态</dt>
+              <dd>{{ subscriptionStatusText }}</dd>
+            </div>
+            <div v-if="account.subscriptionActiveUntil">
+              <dt>套餐到期</dt>
+              <dd>{{ account.subscriptionActiveUntil ? fmtTime(account.subscriptionActiveUntil) : '上游未提供' }}</dd>
+            </div>
+            <div v-if="account.subscriptionActiveUntil">
+              <dt>剩余</dt>
+              <dd>{{ account.subscriptionActiveUntil ? subscriptionRemaining : '上游未提供' }}</dd>
+            </div>
+            <div v-if="account.subscriptionWillRenew !== null">
+              <dt>自动续费</dt>
+              <dd :class="account.subscriptionWillRenew === true ? 'text-warn' : account.subscriptionWillRenew === false ? 'text-good' : ''">
+                {{ renewalStatusText }}
+              </dd>
+            </div>
+            <div v-if="account.lastPayment">
+              <dt>最近付款时间</dt>
+              <dd>{{ lastPaymentAtText }}</dd>
+            </div>
+            <div v-if="account.lastPayment">
+              <dt>最近付款</dt>
+              <dd>{{ lastPaymentText }}</dd>
+            </div>
+            <div v-if="account.paymentMethod">
+              <dt>支付方式</dt>
+              <dd>{{ paymentMethodText }}</dd>
+            </div>
+          </dl>
+        </div>
+        <div v-else class="rounded-xl bg-soft p-3 text-sm text-muted">
+          暂未获取到账号摘要，请返回上一步重新校验后再提交。
+        </div>
+
+        <div v-if="alreadySatisfied" class="alert" style="background: var(--warn-soft, #fef3c7); color: var(--warn, #b45309); border-color: var(--warn, #d97706)">
+          {{ alreadySatisfiedHint }}
+        </div>
+
+        <div v-if="account.subscriptionIsDelinquent === true" class="alert" style="background: var(--warn-soft, #fef3c7); color: var(--warn, #b45309); border-color: var(--warn, #d97706)">
+          该账号有未结清账单（欠费）。仍可兑换：卡台会先取消原订阅再重新开通，但成功率低于正常账号。
+        </div>
+
+        <label class="portal-confirm-check"><input id="confirm-account" v-model="confirmedAccount" type="checkbox" :disabled="busy" /><span>我已核对充值邮箱和目标套餐，确认使用这张卡密兑换。</span></label>
+        <div v-if="error" class="alert alert-error" role="alert">{{ error }}</div>
+        <div class="flex gap-3">
+          <button class="btn-secondary flex-1" :disabled="busy" @click="step = 2; confirmedAccount = false">上一步</button>
+          <button class="btn-primary flex-1" :disabled="busy || alreadySatisfied || !account.checked || !confirmedAccount" @click="doRedeem">
+            {{ busy ? '正在提交…' : alreadySatisfied ? '当前套餐已满足' : '确认并开始兑换' }}
+          </button>
+        </div>
+      </div>
+
+      <!-- 4 result -->
+      <div v-show="step === 4" class="card redeem-stage space-y-4">
+        <h2 class="text-xl font-bold text-ink">兑换进度</h2>
+
+        <div class="flex flex-wrap items-center gap-2">
+          <el-tag :type="statusTagType(resultStatus)" size="large">{{ redemptionStatusLabel(resultStatus) }}</el-tag>
+          <span v-if="polling" class="text-sm text-muted">
+            <span class="inline-block animate-pulse">●</span> 进度自动更新中
+          </span>
+          <span v-else-if="isTerminal(resultStatus)" class="text-sm" :class="resultStatus === 'completed' ? 'text-good' : 'text-muted'">
+            已结束
+          </span>
+        </div>
+
+        <div class="rounded-xl bg-soft p-3 text-sm space-y-2">
+          <div class="flex justify-between gap-3 items-center">
+            <span class="text-muted shrink-0">兑换账号</span>
+            <span class="mono text-ink text-right break-all">{{ displayResultEmail || '—' }}</span>
+          </div>
+          <div class="flex justify-between gap-3 items-center">
+            <span class="text-muted shrink-0">银行卡</span>
+            <span class="mono text-ink">
+              <template v-if="resultCardLastFour">•••• {{ resultCardLastFour }}</template>
+              <template v-else><span class="text-muted">开卡后显示尾号</span></template>
+            </span>
+          </div>
+        </div>
+
+        <div v-if="resultMessage" class="rounded-xl bg-soft p-3 text-sm text-ink">
+          {{ resultMessage }}
+        </div>
+
+        <!-- 进度步骤条（由 stage / events 推导） -->
+        <div class="grid grid-cols-4 gap-2 text-center text-xs">
+          <div
+            v-for="p in progressSteps"
+            :key="p.key"
+            class="rounded-lg border px-2 py-2"
+            :class="p.active ? 'border-primary bg-primary/10 text-ink font-semibold' : 'border-brd text-muted'"
+          >
+            {{ p.label }}
+          </div>
+        </div>
+
+        <!-- 时间线明细（卡台 events） -->
+        <div v-if="timeline.length" class="space-y-0">
+          <div class="text-sm font-medium text-ink mb-2">处理明细</div>
+          <ol class="space-y-3 border-l-2 pl-4" style="border-color: var(--brd)">
+            <li v-for="(ev, idx) in timeline" :key="ev.id || idx" class="relative">
+              <span
+                class="absolute -left-[1.35rem] top-1 h-2.5 w-2.5 rounded-full"
+                :style="{ background: eventDot(ev.category) }"
+              />
+              <div class="flex flex-wrap items-baseline gap-2">
+                <b class="text-sm text-ink">{{ stepLabel(ev.step) }}</b>
+                <el-tag size="small" :type="categoryTag(ev.category)">{{ eventCategoryLabel(ev.category) }}</el-tag>
+                <span class="text-xs text-subtle">{{ fmtTime(ev.created_at) }}</span>
+              </div>
+              <p class="text-sm text-muted mt-0.5">
+                {{ ev.public_message || ev.to_status || '—' }}
+              </p>
+            </li>
+          </ol>
+        </div>
+        <div v-else-if="polling" class="text-sm text-muted">
+          已提交，等待卡台返回步骤明细…
+        </div>
+
+
+
+        <div v-if="error" class="alert alert-error" role="alert">{{ error }}</div>
+        <div v-if="isTerminal(resultStatus) && resultStatus !== 'completed'" class="alert alert-error">
+          本次兑换未完成，请查看上方原因。你可以保留卡密并联系发码方协助。
+        </div>
+        <div v-if="resultStatus === 'completed'" class="alert alert-success">{{ targetPlan === 'pro_20x_renew' ? '续费卡已绑定，请留意后续账期扣款。' : targetPlan.startsWith('credit') ? '点数加购已完成，请到账号中查看。' : '兑换已完成，请到 ChatGPT 账号中确认套餐。' }}</div>
+        <div class="flex flex-wrap gap-3"><button class="btn-secondary" :disabled="polling" @click="startPoll">{{ polling ? '正在更新进度' : '刷新进度' }}</button><button v-if="isTerminal(resultStatus)" class="btn-secondary" @click="resetAll">兑换其他卡密</button><router-link to="/history" class="btn-secondary">查询中心</router-link></div>
+      </div>
+    </div>
+  </div>
+</template>
+
+<script setup lang="ts">
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
+import { useRoute } from 'vue-router'
+import { Key } from '@element-plus/icons-vue'
+import { extractFullSession, redemptionRequestId, redemptionStatusLabel, previewErrorMessage, USED_CDK_MESSAGE } from '../../lib/redemption'
+import RedeemModeTabs from '../../components/RedeemModeTabs.vue'
+import { planLabel, planSatisfied as isSatisfied } from '../../lib/plan'
+
+const route = useRoute()
+const steps = ['验证卡密', '校验账号', '确认兑换', '查看结果']
+const step = ref(1)
+const busy = ref(false)
+const error = ref('')
+const code = ref('')
+const previewInfo = ref<any>(null)
+const redemptionToken = ref('')
+const preflightToken = ref('')
+const clientRequestId = ref('')
+const confirmedAccount = ref(false)
+const sessionRaw = ref('')
+/** 预检成功后的账号/订阅摘要（与卡台 GPT 直充 preflight 字段对齐） */
+const account = ref({
+  checked: false,
+  email: '',
+  currentPlan: '',
+  subscriptionHasActive: null as boolean | null,
+  subscriptionActiveUntil: '',
+  canPurchaseAt: '',
+  subscriptionWillRenew: null as boolean | null,
+  subscriptionIsDelinquent: null as boolean | null,
+  lastPayment: null as any,
+  paymentMethod: null as any,
+})
+const resultStatus = ref('')
+const resultStage = ref('')
+const resultMessage = ref('')
+const resultEmail = ref('')
+const resultCardLastFour = ref('')
+const resultBody = ref<any>(null)
+const timeline = ref<any[]>([])
+const polling = ref(false)
+let pollTimer: any = null
+const displayResultEmail = computed(() => resultEmail.value || account.value.email || '')
+
+const PROGRESS_KEY = 'cdk_redeem_progress_v1'
+const nowTick = ref(Date.now())
+let nowTimer: any = null
+
+const deviceId = (() => {
+  const k = 'cdk_device_id'
+  let v = localStorage.getItem(k)
+  if (!v) {
+    v = 'web-' + Math.random().toString(36).slice(2) + Date.now().toString(36)
+    localStorage.setItem(k, v)
+  }
+  return v
+})()
+
+function saveProgress() {
+  try {
+    const payload = {
+      step: step.value,
+      code: code.value,
+      redemptionToken: redemptionToken.value,
+      preflightToken: preflightToken.value,
+      clientRequestId: clientRequestId.value,
+      previewInfo: previewInfo.value,
+      account: account.value,
+      resultStatus: resultStatus.value,
+      resultStage: resultStage.value,
+      resultMessage: resultMessage.value,
+      resultEmail: resultEmail.value,
+      resultCardLastFour: resultCardLastFour.value,
+      resultBody: resultBody.value,
+      timeline: timeline.value,
+      savedAt: Date.now(),
+    }
+    sessionStorage.setItem(PROGRESS_KEY, JSON.stringify(payload))
+  } catch {
+    /* ignore quota */
+  }
+}
+
+function loadProgress(): boolean {
+  try {
+    const raw = sessionStorage.getItem(PROGRESS_KEY)
+    if (!raw) return false
+    const p = JSON.parse(raw)
+    if (!p || typeof p !== 'object') return false
+    // 超过 7 天丢弃
+    if (p.savedAt && Date.now() - Number(p.savedAt) > 7 * 24 * 3600 * 1000) {
+      sessionStorage.removeItem(PROGRESS_KEY)
+      return false
+    }
+    if (p.code) code.value = String(p.code)
+    if (p.redemptionToken) redemptionToken.value = String(p.redemptionToken)
+    if (p.preflightToken) preflightToken.value = String(p.preflightToken)
+    if (p.clientRequestId) clientRequestId.value = String(p.clientRequestId)
+    if (p.previewInfo) previewInfo.value = p.previewInfo
+    if (p.account && typeof p.account === 'object') {
+      account.value = {
+        checked: !!p.account.checked,
+        email: String(p.account.email || ''),
+        currentPlan: String(p.account.currentPlan || ''),
+        subscriptionHasActive:
+          typeof p.account.subscriptionHasActive === 'boolean' ? p.account.subscriptionHasActive : null,
+        subscriptionActiveUntil: String(p.account.subscriptionActiveUntil || ''),
+        canPurchaseAt: String(p.account.canPurchaseAt || ''),
+        subscriptionWillRenew:
+          typeof p.account.subscriptionWillRenew === 'boolean' ? p.account.subscriptionWillRenew : null,
+        subscriptionIsDelinquent: typeof p.account.subscriptionIsDelinquent === 'boolean' ? p.account.subscriptionIsDelinquent : null,
+        lastPayment: p.account.lastPayment || null,
+        paymentMethod: p.account.paymentMethod || null,
+      }
+    }
+    if (p.resultStatus) resultStatus.value = String(p.resultStatus)
+    if (p.resultStage) resultStage.value = String(p.resultStage)
+    if (p.resultMessage) resultMessage.value = String(p.resultMessage)
+    if (p.resultEmail) resultEmail.value = String(p.resultEmail)
+    if (p.resultCardLastFour) resultCardLastFour.value = String(p.resultCardLastFour)
+    if (p.resultBody) resultBody.value = p.resultBody
+    if (Array.isArray(p.timeline)) timeline.value = p.timeline
+    const s = Number(p.step) || 1
+    // 已提交兑换：恢复结果页
+    if (redemptionToken.value && s >= 4) {
+      step.value = 4
+      return true
+    }
+    // 预检完成：恢复确认页（含订阅摘要）
+    if (preflightToken.value && s === 3) {
+      step.value = 3
+      return true
+    }
+    if (s >= 1 && s <= 4) {
+      step.value = s
+      return s > 1
+    }
+  } catch {
+    /* ignore */
+  }
+  return false
+}
+
+function clearProgress() {
+  try {
+    sessionStorage.removeItem(PROGRESS_KEY)
+  } catch {
+    /* ignore */
+  }
+}
+
+watch(
+  [step, code, redemptionToken, preflightToken, clientRequestId, previewInfo, account, resultStatus, resultStage, resultMessage, resultBody, timeline],
+  () => saveProgress(),
+  { deep: true },
+)
+
+
+const targetPlan = computed(() =>
+  String(previewInfo.value?.plan || previewInfo.value?.plan_type || '').toLowerCase(),
+)
+
+const subscriptionStatusText = computed(() => {
+  if (account.value.subscriptionHasActive === true) return '有效'
+  if (
+    account.value.subscriptionHasActive === false
+    || String(account.value.currentPlan).toLowerCase() === 'free'
+  ) {
+    return '已到期 / 免费版'
+  }
+  return '上游未提供'
+})
+
+const subscriptionStatusTag = computed(() => {
+  if (account.value.subscriptionHasActive === true) return 'success'
+  if (account.value.subscriptionHasActive === false) return 'info'
+  return 'info'
+})
+
+const renewalStatusText = computed(() => {
+  if (account.value.subscriptionWillRenew === true) return '到期后自动续费'
+  if (account.value.subscriptionWillRenew === false) return '到期后不续费'
+  return '上游未提供'
+})
+
+const subscriptionRemaining = computed(() =>
+  remainingTime(account.value.subscriptionActiveUntil, nowTick.value),
+)
+
+const lastPaymentAtText = computed(() => {
+  const lp = account.value.lastPayment
+  if (!lp) return '上游未提供'
+  const at = lp.paidAt || lp.paid_at || lp.created || lp.created_at
+  return at ? fmtTime(at) : '上游未提供'
+})
+
+const lastPaymentText = computed(() => {
+  const lp = account.value.lastPayment
+  if (!lp) return '上游未提供'
+  const amount = formatPaymentAmount(lp.amountMinor ?? lp.amount_minor, lp.currency)
+  const status = String(lp.status || '').toLowerCase() === 'paid' ? '已支付' : (lp.status || '上游未提供')
+  return amount ? `${amount} · ${status}` : status
+})
+
+const paymentMethodText = computed(() => {
+  const method = account.value.paymentMethod
+  if (!method) return '上游未提供'
+  const brand = String(method.brand || method.type || '').toUpperCase()
+  const last4 = method.last4 || method.last_4
+  const label = [brand, last4 ? `**** ${last4}` : ''].filter(Boolean).join(' ')
+  const expMonth = method.expMonth || method.exp_month
+  const expYear = method.expYear || method.exp_year
+  const expiry = expMonth && expYear
+    ? `卡片到期 ${String(expMonth).padStart(2, '0')}/${expYear}`
+    : ''
+  const isDefault = method.isDefault ?? method.is_default
+  return [label, expiry, isDefault ? '默认支付方式' : ''].filter(Boolean).join(' · ') || '上游未提供'
+})
+
+const alreadySatisfied = computed(() => {
+  if (!account.value.checked || !targetPlan.value) return false
+  if (account.value.subscriptionHasActive === false) return false
+  return planSatisfied(account.value.currentPlan, targetPlan.value)
+})
+
+const alreadySatisfiedHint = computed(() => {
+  const plan = planLabel(targetPlan.value)
+  const until = account.value.canPurchaseAt || account.value.subscriptionActiveUntil
+  if (until && account.value.subscriptionWillRenew === true) {
+    return `账号已有 ${plan} 或更高套餐，当前周期至 ${fmtTime(until)} 并会自动续费，取消并到期前不能重复购买。`
+  }
+  if (until && account.value.subscriptionWillRenew === false) {
+    return `账号已有 ${plan} 或更高套餐，最早可在 ${fmtTime(until)} 后再次购买。`
+  }
+  if (until) {
+    return `账号已有 ${plan} 或更高套餐，当前周期至 ${fmtTime(until)}，暂不能重复购买。`
+  }
+  return `账号已有 ${plan} 或更高套餐，本次不能重复购买。`
+})
+
+// 档位判定（可读名 / 是否已满足）抽到 lib/plan.ts：那是纯函数、有单测钉着，
+// 且「绑卡档不能被判成已满足」这条与卡台后端同源。planLabel 直接复用导入的实现；
+// planSatisfied 在这里只做一层薄封装，把「当前码的 plan_flow」喂给纯函数。
+function planSatisfied(currentPlan: string, requestedPlan: string) {
+  return isSatisfied(currentPlan, requestedPlan, previewInfo.value?.plan_flow)
+}
+
+function remainingTime(value: string, timestamp = Date.now()) {
+  const expiresAt = Date.parse(value || '')
+  if (!Number.isFinite(expiresAt)) return '—'
+  const minutes = Math.max(0, Math.ceil((expiresAt - timestamp) / 60000))
+  if (minutes <= 0) return '已到期'
+  const days = Math.floor(minutes / 1440)
+  const hours = Math.floor((minutes % 1440) / 60)
+  const restMinutes = minutes % 60
+  if (days > 0) return `${days} 天 ${hours} 小时`
+  if (hours > 0) return `${hours} 小时 ${restMinutes} 分钟`
+  return `${restMinutes} 分钟`
+}
+
+function formatPaymentAmount(value: unknown, currency: unknown) {
+  if (value === null || value === undefined || value === '') return ''
+  const amount = Number(value)
+  const code = String(currency || '').toUpperCase()
+  if (!Number.isFinite(amount)) return ''
+  let digits = 2
+  if (code) {
+    try {
+      digits =
+        new Intl.NumberFormat(undefined, { style: 'currency', currency: code }).resolvedOptions()
+          .maximumFractionDigits ?? 2
+    } catch {
+      /* use two decimals */
+    }
+  }
+  return `${code ? `${code} ` : ''}${(amount / 10 ** digits).toLocaleString(undefined, {
+    minimumFractionDigits: digits,
+    maximumFractionDigits: digits,
+  })}`
+}
+
+function applyAccountFromPreflight(data: any) {
+  const body = data?.data && typeof data.data === 'object' ? data.data : data || {}
+  account.value = {
+    checked: true,
+    email: String(body.email || body.account_email || ''),
+    currentPlan: String(body.currentPlan || body.current_plan || body.plan || 'free'),
+    subscriptionHasActive:
+      typeof body.subscription_has_active === 'boolean' ? body.subscription_has_active : null,
+    subscriptionActiveUntil: String(body.subscription_active_until || ''),
+    canPurchaseAt: String(body.can_purchase_at || body.subscription_active_until || ''),
+    subscriptionWillRenew:
+      typeof body.subscription_will_renew === 'boolean' ? body.subscription_will_renew : null,
+    // 欠费只提示不拦截：卡台会先取消订阅再重开，多数可恢复
+    subscriptionIsDelinquent:
+      typeof body.subscription_is_delinquent === 'boolean' ? body.subscription_is_delinquent : null,
+    lastPayment: body.last_payment || null,
+    paymentMethod: body.payment_method || null,
+  }
+}
+
+function clearAccount() {
+  account.value = {
+    checked: false,
+    email: '',
+    currentPlan: '',
+    subscriptionHasActive: null,
+    subscriptionActiveUntil: '',
+    canPurchaseAt: '',
+    subscriptionWillRenew: null,
+    subscriptionIsDelinquent: null,
+    lastPayment: null,
+    paymentMethod: null,
+  }
+}
+
+const TERMINAL = new Set(['completed', 'declined', 'failed_precharge', 'cancelled', 'failed'])
+
+function isTerminal(st: string) {
+  return TERMINAL.has(String(st || '').toLowerCase())
+}
+
+function statusTagType(st: string) {
+  const s = String(st || '').toLowerCase()
+  if (s === 'completed') return 'success'
+  if (['declined', 'failed_precharge', 'cancelled', 'failed'].includes(s)) return 'danger'
+  if (['review', 'pending', 'card_open_review', 'card_recharge_review'].includes(s)) return 'warning'
+  return 'info'
+}
+
+function categoryTag(c: string) {
+  if (c === 'success' || c === 'completed') return 'success'
+  if (c === 'failed' || c === 'error') return 'danger'
+  if (c === 'warning') return 'warning'
+  return 'info'
+}
+
+function eventDot(c: string) {
+  if (c === 'success' || c === 'completed') return 'var(--good, #16a34a)'
+  if (c === 'failed' || c === 'error') return 'var(--err, #dc2626)'
+  if (c === 'warning') return 'var(--warn, #d97706)'
+  return 'var(--primary, #2563eb)'
+}
+
+function eventCategoryLabel(category: string) {
+  const labels: Record<string, string> = { success: '已完成', completed: '已完成', failed: '未完成', error: '异常', warning: '待确认', info: '处理中', pending: '处理中' }
+  return labels[category] || '处理记录'
+}
+
+function stepLabel(stepKey: string) {
+  const map: Record<string, string> = {
+    queued: '排队受理',
+    credential_check: '凭证校验',
+    pricing: '计价',
+    checkout: '开卡/绑卡',
+    payment: '支付扣款',
+    subscription: '订阅生效',
+    invoice: '账单',
+    renewal: '续费处理',
+    reconcile: '对账确认',
+    completed: '完成',
+  }
+  return map[stepKey] || stepKey || '处理中'
+}
+
+function fmtTime(v: any) {
+  if (!v) return ''
+  try {
+    const d = new Date(v)
+    if (Number.isNaN(d.getTime())) return String(v)
+    return d.toLocaleString()
+  } catch {
+    return String(v)
+  }
+}
+
+/** 粗粒度进度条：受理 → 开卡/资金 → 支付 → 开通 */
+const progressSteps = computed(() => {
+  const keys = [
+    { key: 'accept', label: '受理' },
+    { key: 'card', label: '准备付款' },
+    { key: 'pay', label: '支付' },
+    { key: 'done', label: '完成' },
+  ]
+  const st = String(resultStatus.value || '').toLowerCase()
+  const stage = String(resultStage.value || '').toLowerCase()
+  let idx = 0
+  if (st === 'completed') idx = 3
+  else if (['declined', 'failed_precharge', 'cancelled', 'failed'].includes(st)) {
+    // 停在失败前最远一步
+    if (stage.includes('pay') || stage.includes('checkout') || stage.includes('subscription')) idx = 2
+    else if (stage.includes('card') || stage.includes('fund')) idx = 1
+    else idx = 0
+  } else if (stage.includes('subscription') || stage.includes('paid') || stage.includes('invoice')) idx = 2
+  else if (stage.includes('dispatch') || stage.includes('payment') || stage.includes('checkout') || stage.includes('spend')) idx = 2
+  else if (stage.includes('card') || stage.includes('fund') || stage.includes('await')) idx = 1
+  else if (timeline.value.some((e) => ['payment', 'subscription', 'checkout'].includes(e.step))) idx = 2
+  else if (timeline.value.length) idx = 1
+  return keys.map((k, i) => ({ ...k, active: i <= idx }))
+})
+
+function extractCardLastFour(order: any): string {
+  const last = String(order?.card_last_four || '').trim()
+  if (/^\d{4}$/.test(last)) return last
+  const n = String(order?.card_number || '').replace(/\D/g, '')
+  return n.length >= 4 ? n.slice(-4) : ''
+}
+
+function applyResultPayload(data: any) {
+  resultBody.value = data
+  // 卡台公开结构：{ order: {status,stage,message,account_email,card_last_four}, events: [] }
+  // 兼容顶层扁平 / data 包裹
+  const order = data?.order || data?.data?.order || data?.data || data || {}
+  const st =
+    order.status ||
+    data?.status ||
+    data?.data?.status ||
+    ''
+  const stage = order.stage || data?.stage || data?.data?.stage || ''
+  const message =
+    order.message ||
+    order.user_message ||
+    data?.message ||
+    data?.user_message ||
+    data?.data?.message ||
+    ''
+  resultStatus.value = st
+  resultStage.value = stage
+  resultMessage.value = message
+  const email = String(order.account_email || order.email || data?.account_email || '').trim()
+  if (email) resultEmail.value = email
+  const last4 = extractCardLastFour(order)
+  if (last4) resultCardLastFour.value = last4
+
+  let events = data?.events || data?.data?.events || order.events || []
+  if (!Array.isArray(events)) events = []
+  timeline.value = events.slice().sort((a: any, b: any) => {
+    const ta = new Date(a.created_at || 0).getTime()
+    const tb = new Date(b.created_at || 0).getTime()
+    return ta - tb
+  })
+}
+
+async function api(path: string, init: RequestInit = {}) {
+  const headers = new Headers(init.headers || {})
+  headers.set('X-Redemption-Device', deviceId)
+  if (init.body && !headers.has('Content-Type')) headers.set('Content-Type', 'application/json')
+  const r = await fetch(path, { ...init, headers, credentials: 'include' })
+  const text = await r.text()
+  let data: any = null
+  try { data = text ? JSON.parse(text) : null } catch { data = { raw: text } }
+  return { r, data }
+}
+
+onUnmounted(() => {
+  if (pollTimer) clearInterval(pollTimer)
+  if (nowTimer) clearInterval(nowTimer)
+})
+
+async function pasteCode() {
+  try {
+    code.value = (await navigator.clipboard.readText()).trim()
+    error.value = ''
+  } catch { error.value = '无法读取剪贴板，请点击输入框后手动粘贴。' }
+}
+
+async function tryResumeByCode(cdk: string): Promise<'resumed' | 'used' | false> {
+  const { r, data } = await api(
+    '/api/v1/public/cdk/result-by-code?code=' + encodeURIComponent(cdk),
+  )
+  if (!r.ok || (data?.code != null && Number(data.code) !== 0)) return false
+  const order = data?.data?.order || data?.order || data?.data || data || {}
+  const status = String(order.status || '').toLowerCase()
+  if (status === 'completed') return 'used'
+  if (!status || isTerminal(status)) return false
+  const tok = data?.redemption_token || data?.data?.redemption_token || ''
+  if (tok) redemptionToken.value = tok
+  applyResultPayload(data)
+  if (!resultStatus.value) resultStatus.value = data?.status || data?.order?.status || 'pending'
+  step.value = 4
+  startPoll()
+  return 'resumed'
+}
+
+async function doPreview() {
+  if (busy.value) return
+  error.value = ''
+  previewInfo.value = null
+  if (!code.value.trim()) {
+    error.value = '请输入 CDK'
+    return
+  }
+  busy.value = true
+  try {
+    const cdk = code.value.trim()
+    const { r, data } = await api('/api/v1/public/cdk/preview', {
+      method: 'POST',
+      body: JSON.stringify({ code: cdk }),
+    })
+    if (!r.ok || (data?.code != null && Number(data.code) !== 0)) {
+      const msg = previewErrorMessage(data)
+      if (msg === USED_CDK_MESSAGE) { error.value = msg; return }
+      // Recover only an existing unfinished order; completed codes stay rejected.
+      if ([400, 409].includes(r.status) || [400, 409].includes(Number(data?.code))) {
+        try {
+          const recovered = await tryResumeByCode(cdk)
+          if (recovered === 'used') { error.value = USED_CDK_MESSAGE; return }
+          if (recovered === 'resumed') { error.value = ''; return }
+        } catch { /* Keep the original validation error if recovery is unavailable. */ }
+      }
+      error.value = msg
+      return
+    }
+    clientRequestId.value = ''
+    preflightToken.value = ''
+    confirmedAccount.value = false
+    // 兼容多种返回结构
+    redemptionToken.value = data.redemption_token || data.data?.redemption_token || data.token || ''
+    previewInfo.value = data.data || data
+    if (!redemptionToken.value) {
+      // 有的实现把 token 放在顶层其它字段
+      error.value = '暂时无法开始兑换，请稍后重试或联系发码方。'
+      return
+    }
+    step.value = 2
+  } catch {
+    error.value = '网络连接暂时中断，请稍后重试验证卡密。'
+  } finally {
+    busy.value = false
+  }
+}
+
+async function doPreflight() {
+  if (busy.value) return
+  confirmedAccount.value = false
+  error.value = ''
+  clearAccount()
+  preflightToken.value = ''
+  busy.value = true
+  try {
+    const session = extractFullSession(sessionRaw.value)
+    if (!session) {
+      error.value = '请粘贴完整 Session JSON（必须含 sessionToken），不能只用 Access Token'
+      return
+    }
+    const credential = { mode: 'session', session }
+    const { r, data } = await api('/api/v1/public/cdk/preflight', {
+      method: 'POST',
+      body: JSON.stringify({
+        code: code.value.trim(),
+        redemption_token: redemptionToken.value,
+        credential,
+      }),
+    })
+    // 卡台 envelope: { code:0, msg, data:{ email, currentPlan, subscription_*, preflight_token } }
+    if (!r.ok || (data && typeof data.code === 'number' && data.code !== 0)) {
+      error.value = data?.error || data?.msg || data?.message || '预检失败'
+      return
+    }
+    const body = data?.data && typeof data.data === 'object' ? data.data : data || {}
+    preflightToken.value = body.preflight_token || data?.preflight_token || ''
+    if (!preflightToken.value) {
+      error.value = '账号校验未完成，请稍后重试。'
+      return
+    }
+    applyAccountFromPreflight(data)
+    sessionRaw.value = ''
+    step.value = 3
+  } catch {
+    error.value = '账号校验连接中断，请稍后重新校验。'
+  } finally {
+    busy.value = false
+  }
+}
+
+async function doRedeem() {
+  if (busy.value || alreadySatisfied.value || !account.value.checked || !confirmedAccount.value) return
+  error.value = ''
+  busy.value = true
+  clientRequestId.value = redemptionRequestId(clientRequestId.value)
+  saveProgress()
+  try {
+    const { r, data } = await api('/api/v1/public/cdk/redeem', {
+      method: 'POST',
+      body: JSON.stringify({
+        redemption_token: redemptionToken.value,
+        preflight_token: preflightToken.value,
+        client_request_id: clientRequestId.value,
+      }),
+    })
+    if (!r.ok && r.status >= 400 && r.status < 500 && r.status !== 409) {
+      error.value = data?.error || data?.msg || data?.message || '提交未通过，请检查账号信息后重试。'
+      return
+    }
+    applyResultPayload(data)
+    if (!resultStatus.value) resultStatus.value = r.ok ? 'queued' : 'pending'
+    if (!r.ok) resultMessage.value = '提交结果正在确认，请保持当前页面查询，不要重复提交。'
+    step.value = 4
+    saveProgress()
+    startPoll()
+  } catch {
+    // The request may have reached the upstream. Recover by reading, never by creating another order.
+    resultStatus.value = 'pending'
+    resultMessage.value = '连接中断，正在确认原订单结果。请不要重复提交。'
+    step.value = 4
+    saveProgress()
+    startPoll()
+  } finally { busy.value = false }
+}
+
+let pollInFlight = false
+function startPoll() {
+  if (pollTimer) clearInterval(pollTimer)
+  if (!redemptionToken.value && !code.value.trim()) {
+    polling.value = false
+    return
+  }
+  polling.value = true
+  const tick = async () => {
+    if (pollInFlight) return
+    pollInFlight = true
+    try {
+      let r: Response
+      let data: any
+      if (redemptionToken.value) {
+        ;({ r, data } = await api(
+          '/api/v1/public/cdk/result?token=' + encodeURIComponent(redemptionToken.value),
+        ))
+      } else {
+        ;({ r, data } = await api(
+          '/api/v1/public/cdk/result-by-code?code=' + encodeURIComponent(code.value.trim()),
+        ))
+        if (r.ok && data?.redemption_token) {
+          redemptionToken.value = data.redemption_token
+        }
+      }
+      if (r.ok) {
+        error.value = ''
+        applyResultPayload(data)
+        saveProgress()
+        if (isTerminal(resultStatus.value)) {
+          polling.value = false
+          if (pollTimer) clearInterval(pollTimer)
+        }
+      } else if (r.status === 404) {
+        error.value = '暂未查询到订单结果。请稍后刷新，或到查询中心核实，不要重复提交。'
+        polling.value = false
+        if (pollTimer) clearInterval(pollTimer)
+      }
+    } catch {
+      error.value = '进度更新暂时中断，连接恢复后将继续查询。'
+    } finally { pollInFlight = false }
+  }
+  tick()
+  pollTimer = setInterval(tick, 3000)
+}
+
+onMounted(() => {
+  nowTimer = setInterval(() => {
+    nowTick.value = Date.now()
+  }, 30000)
+  const q = String(route.query.cdk || route.query.code || '').trim()
+  if (loadProgress()) {
+    if (q && code.value.trim() !== q) {
+      resetAll()
+      code.value = q
+    } else if (step.value === 4 && (redemptionToken.value || code.value)) {
+      startPoll()
+    }
+  } else if (q) {
+    code.value = q
+  }
+})
+
+function resetAll() {
+  if (pollTimer) clearInterval(pollTimer)
+  clearProgress()
+  step.value = 1
+  error.value = ''
+  code.value = ''
+  previewInfo.value = null
+  redemptionToken.value = ''
+  preflightToken.value = ''
+  clientRequestId.value = ''
+  confirmedAccount.value = false
+  sessionRaw.value = ''
+  clearAccount()
+  resultBody.value = null
+  resultStatus.value = ''
+  resultStage.value = ''
+  resultMessage.value = ''
+  resultEmail.value = ''
+  resultCardLastFour.value = ''
+  timeline.value = []
+  polling.value = false
+}
+</script>
+
+<style scoped>
+.text-good { color: var(--good, #16a34a); }
+.text-warn { color: var(--warn, #d97706); }
+.border-primary { border-color: var(--primary) !important; }
+.bg-primary\/10 { background: color-mix(in srgb, var(--primary) 12%, transparent); }
+.border-brd { border-color: var(--brd); }
+.account-facts {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px 16px;
+  margin: 0;
+}
+.account-facts > div {
+  min-width: 0;
+}
+.account-facts dt {
+  margin: 0;
+  font-size: 12px;
+  color: var(--muted, #6b7280);
+}
+.account-facts dd {
+  margin: 2px 0 0;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--ink, #111827);
+  word-break: break-all;
+}
+@media (max-width: 640px) {
+  .account-facts { grid-template-columns: 1fr; }
+}
+</style>

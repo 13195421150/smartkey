@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" href="/black-cat.png" type="image/png" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>卡密兑换中心</title>
+    <meta name="description" content="自助卡密兑换中心：单笔与批量兑换、兑换进度、订阅状态查询及使用指南。" />
+    <script>
+      (function () {
+        try {
+          var mode = localStorage.getItem('theme-mode') || 'light'
+          var skin = localStorage.getItem('site-skin') || 'terracotta'
+          var dark =
+            mode === 'dark' ||
+            (mode === 'auto' &&
+              window.matchMedia &&
+              window.matchMedia('(prefers-color-scheme: dark)').matches)
+          // preferDark 皮肤默认暗色，减少首屏闪白
+          if (skin === 'cyber' || skin === 'ember' || skin === 'noir') dark = true
+          if (dark) document.documentElement.classList.add('dark')
+          document.documentElement.setAttribute('data-skin', skin)
+          var layoutMap = { cyber: 'sidebar', slate: 'rail' }
+          document.documentElement.setAttribute('data-layout', layoutMap[skin] || 'top')
+        } catch (e) {}
+      })()
+    </script>
+  </head>
+  <body>
+    <div id="app"></div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

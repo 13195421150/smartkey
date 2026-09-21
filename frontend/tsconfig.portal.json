@@ -1,0 +1,23 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noUnusedLocals": false,
+    "noUnusedParameters": false,
+    "types": ["vite/client"]
+  },
+  "include": [
+    "src/layouts/PortalLayout.vue",
+    "src/layouts/AdminLayout.vue",
+    "src/views/auth/LoginView.vue",
+    "src/components/RedeemModeTabs.vue",
+    "src/views/user/RechargeView.vue",
+    "src/views/user/BatchRedeemView.vue",
+    "src/views/user/CDKStatusView.vue",
+    "src/views/user/BillingCheckView.vue",
+    "src/views/user/AgentSwapView.vue",
+    "src/views/user/TutorialView.vue",
+    "src/lib/redemption.ts",
+    "src/lib/__tests__/*.test.ts"
+  ],
+  "references": []
+}
