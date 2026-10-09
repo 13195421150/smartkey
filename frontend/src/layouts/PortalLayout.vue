@@ -20,7 +20,6 @@
         <div class="portal-eyebrow"><span></span> SELF-SERVICE · {{ en ? 'MADE SIMPLE' : '简单一点，清楚一点' }}</div>
         <h1 v-if="section === 'redeem'">{{ en ? 'Your next upgrade,' : '让每一次升级，' }}<span>{{ en ? ' starts here.' : '轻松一点。' }}</span></h1>
         <h1 v-else-if="section === 'query'">{{ en ? 'Every step,' : '每一步进度，' }}<span>{{ en ? ' in the clear.' : '都有答案。' }}</span></h1>
-        <h1 v-else-if="section === 'partner'">{{ en ? 'A little help,' : '遇到问题，' }}<span>{{ en ? ' to keep going.' : '一起解决。' }}</span></h1>
         <h1 v-else>{{ en ? 'A clear guide,' : '开始之前，' }}<span>{{ en ? ' from start to finish.' : '看这里。' }}</span></h1>
         <p>{{ heroSubtitle }}</p>
       </section>
@@ -72,11 +71,10 @@ import '../portal.css'
 const route = useRoute()
 const { locale } = useI18n({ useScope: 'global' })
 const en = computed(() => locale.value === 'en')
-const section = computed(() => ['/history', '/billing'].includes(route.path) ? 'query' : route.path === '/tutorial' ? 'guide' : route.path === '/partner/swap' ? 'partner' : 'redeem')
+const section = computed(() => ['/history', '/billing'].includes(route.path) ? 'query' : route.path === '/tutorial' ? 'guide' : 'redeem')
 const heroSubtitle = computed(() => {
   if (section.value === 'query') return en.value ? 'Check your CDK progress and subscription status.' : '查看卡密进度与账号订阅状态。'
   if (section.value === 'guide') return en.value ? 'From your first code to the final result. A guide for every step.' : '从卡密到兑换结果，把每一步说明白。'
-  if (section.value === 'partner') return en.value ? 'A dedicated workspace for authorized partners.' : '面向授权代理的卡密补发入口。'
   return en.value ? 'Verify your code. Confirm your account. Follow your progress.' : '验证卡密，确认账户，查看结果。把复杂的事交给我们。'
 })
 const connection = ref<'checking' | 'online' | 'offline'>('checking')
