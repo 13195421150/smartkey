@@ -290,6 +290,9 @@ func createTables() error {
 	if err := migrateCardplatformCDKStatusCol(); err != nil {
 		log.Printf("migrateCardplatformCDKStatusCol: %v", err)
 	}
+	if err := InitCDKRotationSchema(); err != nil {
+		return err
+	}
 	if err := ensureDefaultAdmin(); err != nil {
 		return err
 	}
@@ -690,7 +693,7 @@ func normalizeCDKCode(code string) string {
 }
 
 // BindCDKRedemptionToken preview 成功后：码 ↔ redemption_token
-func BindCDKRedemptionToken(cdkCode, redemptionToken string) error {
+func BindCDKRedemptionToken(cdkCode, redemptionToken string, upstreamTokens ...string) error {
 	if DB == nil {
 		return fmt.Errorf("db not ready")
 	}
@@ -699,14 +702,33 @@ func BindCDKRedemptionToken(cdkCode, redemptionToken string) error {
 	if code == "" || tok == "" {
 		return nil
 	}
-	_, err := DB.Exec(`
+	tx, err := DB.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	_, err = tx.Exec(`
 		INSERT INTO cdk_session_bindings (cdk_code, session_payload, redemption_token, updated_at)
 		VALUES (?, '', ?, CURRENT_TIMESTAMP)
 		ON CONFLICT(cdk_code) DO UPDATE SET
 			redemption_token = excluded.redemption_token,
 			updated_at = CURRENT_TIMESTAMP
 	`, code, tok)
-	return err
+	if err != nil {
+		return err
+	}
+	upstreamToken := tok
+	if len(upstreamTokens) > 0 {
+		upstreamToken = upstreamTokens[0]
+	}
+	device := ""
+	if len(upstreamTokens) > 1 {
+		device = upstreamTokens[1]
+	}
+	if err = RegisterSiteCDKToken(tx, code, tok, upstreamToken, device); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 // BindCDKSession 预检/兑换时写入 session（可按码或 redemption_token 关联）
@@ -816,8 +838,16 @@ func FindCodeByRedemptionToken(redemptionToken string) (string, error) {
 	if tok == "" {
 		return "", nil
 	}
+	var registered string
+	err := DB.QueryRow(`SELECT canonical_code FROM cdk_site_tokens WHERE token_hash=?`, tokenHash(tok)).Scan(&registered)
+	if err == nil {
+		return registered, nil
+	}
+	if err != sql.ErrNoRows {
+		return "", err
+	}
 	var code string
-	err := DB.QueryRow(`
+	err = DB.QueryRow(`
 		SELECT cdk_code FROM cdk_session_bindings
 		WHERE redemption_token = ?
 		LIMIT 1
@@ -904,6 +934,24 @@ func SaveCardplatformCDKCodeWithStatus(upstreamID int64, code, prefix, plan stri
 		return fmt.Errorf("db not init")
 	}
 	code = strings.TrimSpace(code)
+	var mapped string
+	err := DB.QueryRow(`SELECT canonical_code FROM cdk_site_codes WHERE site_code=? COLLATE NOCASE`, code).Scan(&mapped)
+	if err == nil {
+		return nil
+	} // Active site code is already persisted; never import it as an upstream CDK.
+	if err != sql.ErrNoRows {
+		return err
+	}
+	err = DB.QueryRow(`SELECT canonical_code FROM cdk_site_retired WHERE code_hash=?`, HashCDKCode(code)).Scan(&mapped)
+	if err == nil {
+		canonical, _ := cdkcode.Parse(code)
+		if !strings.EqualFold(canonical, mapped) {
+			return nil
+		} // Retired random site keys never become upstream records.
+	}
+	if err != nil && err != sql.ErrNoRows {
+		return err
+	}
 	canonical, aliasPlan := cdkcode.Parse(code)
 	if aliasPlan != "" {
 		if plan != "" && !strings.EqualFold(plan, aliasPlan) {
@@ -931,7 +979,7 @@ func SaveCardplatformCDKCodeWithStatus(upstreamID int64, code, prefix, plan stri
 	if status == "" {
 		status = "unused"
 	}
-	_, err := DB.Exec(`
+	_, err = DB.Exec(`
 		INSERT INTO cardplatform_cdk_codes (upstream_id, code, code_prefix, plan, fee_amount_minor, status, created_at)
 		VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
 		ON CONFLICT(code) DO UPDATE SET
@@ -1003,6 +1051,7 @@ func ListCardplatformStoredCDKCodes(plan, q string, limit int) ([]StoredCDKCode,
 func cardplatformStoredWhere(plan, q, status string) (where string, args []any) {
 	plan = strings.TrimSpace(plan)
 	q = strings.TrimSpace(q)
+	siteQuery := q
 	plan, q = cdkcode.Search(plan, q)
 	status = strings.TrimSpace(strings.ToLower(status))
 	where = ` WHERE 1=1`
@@ -1016,7 +1065,8 @@ func cardplatformStoredWhere(plan, q, status string) (where string, args []any) 
 	}
 	if q != "" {
 		where += ` AND (
-			code LIKE ? COLLATE NOCASE
+			code IN (SELECT canonical_code FROM cdk_site_codes WHERE site_code LIKE ? COLLATE NOCASE)
+			OR code LIKE ? COLLATE NOCASE
 			OR code_prefix LIKE ? COLLATE NOCASE
 			OR CAST(upstream_id AS TEXT) = ?
 			OR upstream_id IN (
@@ -1025,7 +1075,7 @@ func cardplatformStoredWhere(plan, q, status string) (where string, args []any) 
 			)
 		)`
 		like := "%" + q + "%"
-		args = append(args, like, like, q, like)
+		args = append(args, "%"+siteQuery+"%", like, like, q, like)
 	}
 	return where, args
 }
@@ -1255,7 +1305,7 @@ func MapCardplatformCDKNotes(ids []int64) map[int64]string {
 	return out
 }
 
-// ---- 代理失败换码 ----
+// Canonical, case-insensitive digest for retired site keys.
 
 func HashCDKCode(code string) string {
 	code = strings.ToUpper(strings.TrimSpace(code))
@@ -1281,27 +1331,6 @@ func LookupStoredCDKByCode(code string) (upstreamID int64, plan, prefix, status 
 		return 0, "", "", "", false
 	}
 	return upstreamID, plan, prefix, status, true
-}
-
-func AgentCDKAlreadyExchanged(codeHash string) bool {
-	if DB == nil || codeHash == "" {
-		return false
-	}
-	var n int
-	_ = DB.QueryRow(`SELECT COUNT(*) FROM agent_cdk_exchanges WHERE old_code_hash = ?`, codeHash).Scan(&n)
-	return n > 0
-}
-
-func RecordAgentCDKExchange(oldHash string, oldID, newID int64, oldPrefix, newPrefix, plan string, orderID int64, orderStatus, ip string) error {
-	if DB == nil {
-		return fmt.Errorf("db not init")
-	}
-	_, err := DB.Exec(`
-		INSERT INTO agent_cdk_exchanges
-		(old_code_hash, old_upstream_id, new_upstream_id, old_code_prefix, new_code_prefix, plan, order_id, order_status, ip, created_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
-	`, oldHash, oldID, newID, oldPrefix, newPrefix, plan, orderID, orderStatus, ip)
-	return err
 }
 
 // ---- 自动选卡权重配置 ----
@@ -1499,6 +1528,47 @@ func UpsertCardProduct(p CardProductCache) error {
 	`, p.ProductCode, p.Issuer, p.BIN, p.Network, p.IssuingArea, p.Scene, p.CardGroup,
 		p.Description, string(binHeadsJSON), onlineInt, p.SuspendedAt)
 	return err
+}
+
+// PruneCardProductsExcept 删除不在 present 集合中的缓存产品（含早先已标下线的）。
+// 卡台接口列表外的卡段视为已下架；删除本地 BIN/描述缓存，避免继续对外展示。
+// present 为空时不动，避免异常空响应清空缓存。
+func PruneCardProductsExcept(present map[string]bool) (int, error) {
+	if DB == nil {
+		return 0, fmt.Errorf("db not ready")
+	}
+	if len(present) == 0 {
+		return 0, nil
+	}
+	rows, err := DB.Query(`SELECT product_code FROM card_product_cache`)
+	if err != nil {
+		return 0, err
+	}
+	defer rows.Close()
+	var stale []string
+	for rows.Next() {
+		var code string
+		if err := rows.Scan(&code); err != nil {
+			return 0, err
+		}
+		if !present[strings.TrimSpace(code)] {
+			stale = append(stale, code)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return 0, err
+	}
+	n := 0
+	for _, code := range stale {
+		res, err := DB.Exec(`DELETE FROM card_product_cache WHERE product_code = ?`, code)
+		if err != nil {
+			return n, err
+		}
+		if affected, _ := res.RowsAffected(); affected > 0 {
+			n++
+		}
+	}
+	return n, nil
 }
 
 // MarkCardProductsOfflineExcept 将不在 present 集合中的缓存产品标为已下线。
