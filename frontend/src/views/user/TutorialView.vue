@@ -77,7 +77,7 @@
       <details><summary>处理中很久，可以再提交一次吗？</summary><p>请先查询原订单。待确认或待对账期间，不要重复提交；只有明确的最终失败结果，才按页面提示处理。</p></details>
       <details><summary>我可以取消已经提交的兑换吗？</summary><p>是否能取消取决于上游处理阶段。当前站点没有开放自助取消接口，关闭页面不会取消订单。需要协助时，请携带卡密和订单状态联系发码方。</p></details>
       <details><summary>批量兑换如何使用？</summary><p>在充值兑换中切换到“批量”，按提示导入卡密和账号信息，检查配对结果后提交。系统支持暂停后续提交；已经开始处理的任务会继续。</p></details>
-      <details><summary>如何补发失败的卡密？</summary><p>请先确认订单最终失败且未扣款，并联系发码方。授权代理可使用 <router-link class="app-link underline" to="/partner/swap">代理补发入口</router-link>，该入口需要管理员提供的代理密码。</p></details>
+      <details><summary>如何补发失败的卡密？</summary><p>请先查询兑换进度，确认订单最终失败后联系发码方处理。</p></details>
       <details><summary>我的账号信息应该如何保管？</summary><p>Session 包含敏感的账号凭据。只在你确认可信的兑换页面提交，不要公开发送截图或粘贴到群聊。完成后可以清空当前页面中的输入内容。</p></details>
     </section>
   </article>

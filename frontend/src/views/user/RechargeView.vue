@@ -28,10 +28,12 @@
       <div v-show="step === 2" class="card redeem-stage space-y-4">
         <h2 class="text-xl font-bold text-ink">准备你的账号信息</h2>
         <p class="text-sm text-muted">目标套餐：<strong>{{ planLabel(targetPlan) }}</strong>。请确认浏览器登录的是需要充值的账号。</p>
-        <p class="text-sm text-muted">打开
-          <a class="app-link" href="https://chatgpt.com/api/auth/session" target="_blank" rel="noopener">chatgpt.com/api/auth/session</a>
-          复制<strong>完整 JSON</strong>（必须含 <code>sessionToken</code>）。已禁用纯 Access Token。
-        </p>
+        <ol class="list-decimal space-y-2 pl-5 text-sm text-muted">
+          <li><strong>用登录了 ChatGPT 的浏览器打开链接</strong>：
+            <a class="app-link" href="https://chatgpt.com/api/auth/session" target="_blank" rel="noopener">chatgpt.com/api/auth/session</a>，进去复制<strong>完整的 session（网页内容全部复制下来）</strong>。
+          </li>
+          <li>把<strong>完整的 session</strong>粘贴到下面的输入栏中，点击“校验账号信息”，确认账号信息无误后点击“确定兑换”就行。</li>
+        </ol>
         <label for="redeem-session" class="block text-sm font-semibold text-ink">完整 Session 内容</label>
         <textarea id="redeem-session" spellcheck="false" autocomplete="off" v-model="sessionRaw" class="input h-36 font-mono text-xs" placeholder='{"user":{...},"accessToken":"eyJ...","sessionToken":"eyJ...五段JWE..."}' />
         <div v-if="error" class="alert alert-error" role="alert">{{ error }}</div>
@@ -97,20 +99,24 @@
           暂未获取到账号摘要，请返回上一步重新校验后再提交。
         </div>
 
-        <div v-if="alreadySatisfied" class="alert" style="background: var(--warn-soft, #fef3c7); color: var(--warn, #b45309); border-color: var(--warn, #d97706)">
+        <div v-if="alreadySatisfied && !needsSubscriptionRecovery && !recoveryPending" class="alert" style="background: var(--warn-soft, #fef3c7); color: var(--warn, #b45309); border-color: var(--warn, #d97706)">
           {{ alreadySatisfiedHint }}
         </div>
 
-        <div v-if="account.subscriptionIsDelinquent === true" class="alert" style="background: var(--warn-soft, #fef3c7); color: var(--warn, #b45309); border-color: var(--warn, #d97706)">
-          该账号有未结清账单（欠费）。仍可兑换：卡台会先取消原订阅再重新开通，但成功率低于正常账号。
+        <div v-if="needsSubscriptionRecovery || recoveryPending" class="alert" style="background: var(--warn-soft, #fef3c7); color: var(--warn, #b45309); border-color: var(--warn, #d97706)">
+          <p>{{ t(recoveryPending ? 'grace.pending' : 'grace.hint') }}</p>
+          <button v-if="needsSubscriptionRecovery && !recoveryPending" class="btn-secondary mt-3" :disabled="busy || recoveringSubscription || !preflightToken" @click="recoverGraceSubscription">
+            {{ t(recoveringSubscription ? 'grace.processing' : 'grace.action') }}
+          </button>
+          <button v-else class="btn-secondary mt-3" :disabled="busy || recoveringSubscription" @click="doPreflight">{{ t('grace.recheck') }}</button>
         </div>
 
         <label class="portal-confirm-check"><input id="confirm-account" v-model="confirmedAccount" type="checkbox" :disabled="busy" /><span>我已核对充值邮箱和目标套餐，确认使用这张卡密兑换。</span></label>
         <div v-if="error" class="alert alert-error" role="alert">{{ error }}</div>
         <div class="flex gap-3">
-          <button class="btn-secondary flex-1" :disabled="busy" @click="step = 2; confirmedAccount = false">上一步</button>
-          <button class="btn-primary flex-1" :disabled="busy || alreadySatisfied || !account.checked || !confirmedAccount" @click="doRedeem">
-            {{ busy ? '正在提交…' : alreadySatisfied ? '当前套餐已满足' : '确认并开始兑换' }}
+          <button class="btn-secondary flex-1" :disabled="busy || recoveringSubscription" @click="step = 2; confirmedAccount = false; invalidatePreflight()">上一步</button>
+          <button class="btn-primary flex-1" :disabled="busy || recoveringSubscription || recoveryPending || needsSubscriptionRecovery || alreadySatisfied || !preflightToken || !account.checked || !confirmedAccount" @click="doRedeem">
+            {{ busy ? '正在提交…' : alreadySatisfied ? '当前套餐已满足' : '确定兑换' }}
           </button>
         </div>
       </div>
@@ -202,12 +208,18 @@ import { useRoute } from 'vue-router'
 import { Key } from '@element-plus/icons-vue'
 import { extractFullSession, redemptionRequestId, redemptionStatusLabel, previewErrorMessage, USED_CDK_MESSAGE } from '../../lib/redemption'
 import RedeemModeTabs from '../../components/RedeemModeTabs.vue'
+import { useI18n } from 'vue-i18n'
+import { dialog } from '../../lib/dialog'
 import { planLabel, planSatisfied as isSatisfied } from '../../lib/plan'
 
+const { t } = useI18n({ useScope: 'global' })
 const route = useRoute()
 const steps = ['验证卡密', '校验账号', '确认兑换', '查看结果']
 const step = ref(1)
 const busy = ref(false)
+const recoveringSubscription = ref(false)
+const recoveryPending = ref(false)
+let preflightSequence = 0
 const error = ref('')
 const code = ref('')
 const previewInfo = ref<any>(null)
@@ -225,6 +237,7 @@ const account = ref({
   subscriptionActiveUntil: '',
   canPurchaseAt: '',
   subscriptionWillRenew: null as boolean | null,
+  subscriptionRecoveryRequired: false,
   subscriptionIsDelinquent: null as boolean | null,
   lastPayment: null as any,
   paymentMethod: null as any,
@@ -238,6 +251,7 @@ const resultBody = ref<any>(null)
 const timeline = ref<any[]>([])
 const polling = ref(false)
 let pollTimer: any = null
+let clearingSessionAfterPreflight = false
 const displayResultEmail = computed(() => resultEmail.value || account.value.email || '')
 
 const PROGRESS_KEY = 'cdk_redeem_progress_v1'
@@ -271,6 +285,7 @@ function saveProgress() {
       resultCardLastFour: resultCardLastFour.value,
       resultBody: resultBody.value,
       timeline: timeline.value,
+      recoveryPending: recoveryPending.value,
       savedAt: Date.now(),
     }
     sessionStorage.setItem(PROGRESS_KEY, JSON.stringify(payload))
@@ -306,11 +321,13 @@ function loadProgress(): boolean {
         canPurchaseAt: String(p.account.canPurchaseAt || ''),
         subscriptionWillRenew:
           typeof p.account.subscriptionWillRenew === 'boolean' ? p.account.subscriptionWillRenew : null,
+        subscriptionRecoveryRequired: p.account.subscriptionRecoveryRequired === true,
         subscriptionIsDelinquent: typeof p.account.subscriptionIsDelinquent === 'boolean' ? p.account.subscriptionIsDelinquent : null,
         lastPayment: p.account.lastPayment || null,
         paymentMethod: p.account.paymentMethod || null,
       }
     }
+    recoveryPending.value = p.recoveryPending === true
     if (p.resultStatus) resultStatus.value = String(p.resultStatus)
     if (p.resultStage) resultStage.value = String(p.resultStage)
     if (p.resultMessage) resultMessage.value = String(p.resultMessage)
@@ -348,10 +365,30 @@ function clearProgress() {
 }
 
 watch(
-  [step, code, redemptionToken, preflightToken, clientRequestId, previewInfo, account, resultStatus, resultStage, resultMessage, resultBody, timeline],
+  [step, code, redemptionToken, preflightToken, clientRequestId, previewInfo, account, recoveryPending, resultStatus, resultStage, resultMessage, resultBody, timeline],
   () => saveProgress(),
   { deep: true },
 )
+
+watch(code, invalidatePreflight, { flush: 'sync' })
+watch(sessionRaw, (value) => {
+  if (clearingSessionAfterPreflight && value === '') {
+    clearingSessionAfterPreflight = false
+    return
+  }
+  invalidatePreflight()
+}, { flush: 'sync' })
+
+const needsSubscriptionRecovery = computed(() => account.value.checked &&
+  (account.value.subscriptionRecoveryRequired || account.value.subscriptionIsDelinquent === true))
+
+function invalidatePreflight() {
+  preflightSequence++
+  preflightToken.value = ''
+  clientRequestId.value = ''
+  recoveryPending.value = false
+  clearAccount()
+}
 
 
 const targetPlan = computed(() =>
@@ -482,14 +519,14 @@ function applyAccountFromPreflight(data: any) {
   account.value = {
     checked: true,
     email: String(body.email || body.account_email || ''),
-    currentPlan: String(body.currentPlan || body.current_plan || body.plan || 'free'),
+    currentPlan: String(body.currentPlan || body.current_plan || body.plan || ''),
     subscriptionHasActive:
       typeof body.subscription_has_active === 'boolean' ? body.subscription_has_active : null,
     subscriptionActiveUntil: String(body.subscription_active_until || ''),
     canPurchaseAt: String(body.can_purchase_at || body.subscription_active_until || ''),
     subscriptionWillRenew:
       typeof body.subscription_will_renew === 'boolean' ? body.subscription_will_renew : null,
-    // 欠费只提示不拦截：卡台会先取消订阅再重开，多数可恢复
+    subscriptionRecoveryRequired: body.subscription_recovery_required === true,
     subscriptionIsDelinquent:
       typeof body.subscription_is_delinquent === 'boolean' ? body.subscription_is_delinquent : null,
     lastPayment: body.last_payment || null,
@@ -506,6 +543,7 @@ function clearAccount() {
     subscriptionActiveUntil: '',
     canPurchaseAt: '',
     subscriptionWillRenew: null,
+    subscriptionRecoveryRequired: false,
     subscriptionIsDelinquent: null,
     lastPayment: null,
     paymentMethod: null,
@@ -681,7 +719,8 @@ async function tryResumeByCode(cdk: string): Promise<'resumed' | 'used' | false>
 }
 
 async function doPreview() {
-  if (busy.value) return
+  if (busy.value || recoveringSubscription.value) return
+  invalidatePreflight()
   error.value = ''
   previewInfo.value = null
   if (!code.value.trim()) {
@@ -729,11 +768,11 @@ async function doPreview() {
 }
 
 async function doPreflight() {
-  if (busy.value) return
+  if (busy.value || recoveringSubscription.value) return
   confirmedAccount.value = false
+  invalidatePreflight()
+  const sequence = preflightSequence
   error.value = ''
-  clearAccount()
-  preflightToken.value = ''
   busy.value = true
   try {
     const session = extractFullSession(sessionRaw.value)
@@ -750,6 +789,7 @@ async function doPreflight() {
         credential,
       }),
     })
+    if (sequence !== preflightSequence) return
     // 卡台 envelope: { code:0, msg, data:{ email, currentPlan, subscription_*, preflight_token } }
     if (!r.ok || (data && typeof data.code === 'number' && data.code !== 0)) {
       error.value = data?.error || data?.msg || data?.message || '预检失败'
@@ -762,6 +802,7 @@ async function doPreflight() {
       return
     }
     applyAccountFromPreflight(data)
+    clearingSessionAfterPreflight = true
     sessionRaw.value = ''
     step.value = 3
   } catch {
@@ -771,8 +812,45 @@ async function doPreflight() {
   }
 }
 
+async function recoverGraceSubscription() {
+  if (busy.value || recoveringSubscription.value || !needsSubscriptionRecovery.value || !preflightToken.value) return
+  const token = preflightToken.value
+  const redemption = redemptionToken.value
+  const sequence = preflightSequence
+  recoveringSubscription.value = true
+  try {
+    const confirmed = await dialog.confirm(t('grace.confirm'), {
+      title: t('grace.title'), okText: t('grace.confirmAction'), cancelText: t('grace.dismiss'), danger: true,
+    })
+    if (!confirmed || sequence !== preflightSequence || token !== preflightToken.value || redemption !== redemptionToken.value) return
+    preflightToken.value = ''
+    recoveryPending.value = true
+    try {
+      const { r, data } = await api('/api/v1/public/cdk/recover-subscription', {
+        method: 'POST',
+        body: JSON.stringify({ redemption_token: redemption, preflight_token: token, confirmed: true }),
+      })
+      if (sequence !== preflightSequence || redemption !== redemptionToken.value) return
+      if (!r.ok || (typeof data?.code === 'number' && data.code !== 0)) throw new Error('recovery_unconfirmed')
+      const result = data?.data || data
+      if (result?.preflight) {
+        applyAccountFromPreflight(result.preflight)
+        preflightToken.value = result.preflight.preflight_token || ''
+        confirmedAccount.value = false
+      }
+      recoveryPending.value = result?.status !== 'cleared' || !preflightToken.value
+      error.value = ''
+      dialog.toast(t(recoveryPending.value ? 'grace.pending' : 'grace.done'), recoveryPending.value ? 'warn' : 'ok')
+    } catch {
+      if (sequence === preflightSequence) error.value = t('grace.refreshFailed')
+    }
+  } finally {
+    recoveringSubscription.value = false
+  }
+}
+
 async function doRedeem() {
-  if (busy.value || alreadySatisfied.value || !account.value.checked || !confirmedAccount.value) return
+  if (busy.value || recoveringSubscription.value || recoveryPending.value || needsSubscriptionRecovery.value || alreadySatisfied.value || !preflightToken.value || !account.value.checked || !confirmedAccount.value) return
   error.value = ''
   busy.value = true
   clientRequestId.value = redemptionRequestId(clientRequestId.value)
