@@ -122,10 +122,10 @@ func doSync(ctx context.Context) (SyncResult, error) {
 		}
 	}
 	// 3. 本次未返回的历史缓存 → 标已下线（如全部 VISA 已从卡台下架）
-	if off, err := db.MarkCardProductsOfflineExcept(present); err != nil {
-		log.Printf("[plan-sync] mark offline: %v", err)
+	if off, err := db.PruneCardProductsExcept(present); err != nil {
+		log.Printf("[plan-sync] prune products: %v", err)
 	} else if off > 0 {
-		log.Printf("[plan-sync] marked %d products offline (not in openable list)", off)
+		log.Printf("[plan-sync] removed %d delisted products (not in openable list)", off)
 	}
 	return res, nil
 }
@@ -163,10 +163,10 @@ func syncDirectCardProducts(ctx context.Context, cli *cardplatform.Client) (int,
 		}
 		n++
 	}
-	if off, err := db.MarkCardProductsOfflineExcept(present); err != nil {
-		log.Printf("[plan-sync] mark offline: %v", err)
+	if off, err := db.PruneCardProductsExcept(present); err != nil {
+		log.Printf("[plan-sync] prune products: %v", err)
 	} else if off > 0 {
-		log.Printf("[plan-sync] marked %d products offline (not in card-products)", off)
+		log.Printf("[plan-sync] removed %d delisted products (not in card-products)", off)
 	}
 	return n, nil
 }
