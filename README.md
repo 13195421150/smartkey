@@ -11,7 +11,9 @@
 - 卡台 CDK 发码、同步、停用、对账与 Webhook
 - 卡池诊断、选卡优先级和失败归因
 - 北京时间展示与未完成订单恢复
-- `PLUS-`、`Pro5X-`、`Pro20X-` 套餐前缀；原 `ZC-` 码仍兼容
+- `PLUS-`、`Pro5X-`、`Pro20X-` 套餐前缀
+- 后台未使用卡密换新：保持原卡台映射、ID、任务和失败记录，旧码及旧会话在本站立即失效
+- 宽限期订阅恢复与卡池产品缓存清理
 
 ## 部署
 
@@ -23,7 +25,7 @@ docker compose up -d --build
 
 首次打开 `https://你的域名/ops/setup`，使用 `.env` 中的 `SETUP_BOOTSTRAP_TOKEN` 创建管理员；随后在 `/ops/integration` 配置自己的卡台 API。
 
-完整说明见 [DEPLOYMENT.md](DEPLOYMENT.md)，套餐前缀见 [docs/site-cdk-prefixes.md](docs/site-cdk-prefixes.md)。
+完整说明见 [DEPLOYMENT.md](DEPLOYMENT.md)，套餐前缀见 [docs/site-cdk-prefixes.md](docs/site-cdk-prefixes.md)，卡密换新见 [docs/site-cdk-rotation.md](docs/site-cdk-rotation.md)。
 
 ## 本地验证
 
@@ -32,6 +34,8 @@ cd frontend
 npm ci
 npm test
 npm run typecheck:portal
+npm run test:grace-recovery
+npm run test:cdk-rotation
 npm run build
 
 cd ../backend
