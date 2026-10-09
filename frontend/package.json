@@ -1,6 +1,6 @@
 {
   "name": "cdk-recharge-system",
-  "version": "1.4.19",
+  "version": "1.4.27",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -8,7 +8,9 @@
     "preview": "vite preview",
     "test": "vitest run",
     "typecheck:portal": "vue-tsc --noEmit -p tsconfig.portal.json",
-    "lint": "eslint . --ext .vue,.js,.jsx,.cjs,.mjs,.ts,.tsx,.cts,.mts --fix --ignore-path .gitignore"
+    "test:grace-recovery": "node scripts/test-grace-recovery.mjs",
+    "lint": "eslint . --ext .vue,.js,.jsx,.cjs,.mjs,.ts,.tsx,.cts,.mts --fix --ignore-path .gitignore",
+    "test:cdk-rotation": "node scripts/test-cdk-rotation.mjs"
   },
   "dependencies": {
     "@element-plus/icons-vue": "^2.3.2",

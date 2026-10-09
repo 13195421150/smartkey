@@ -14,7 +14,8 @@
     "src/views/user/BatchRedeemView.vue",
     "src/views/user/CDKStatusView.vue",
     "src/views/user/BillingCheckView.vue",
-    "src/views/user/AgentSwapView.vue",
+    "src/views/admin/CDKeyManagement.vue",
+    "src/views/admin/CardIntegration.vue",
     "src/views/user/TutorialView.vue",
     "src/lib/redemption.ts",
     "src/lib/__tests__/*.test.ts"
