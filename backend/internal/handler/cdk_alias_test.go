@@ -66,7 +66,11 @@ func TestAliasPreviewBindsOnlyCanonicalCodeAndRejectsWrongPlan(t *testing.T) {
 	if w.Code != 200 {
 		t.Fatal(w.Code, w.Body.String())
 	}
-	canonical, err := db.FindCodeByRedemptionToken("alias-test-token")
+	token := extractJSONNestedString(w.Body.Bytes(), "data", "redemption_token")
+	if token == "alias-test-token" || !strings.HasPrefix(token, "scdk_") {
+		t.Fatal("raw upstream token exposed")
+	}
+	canonical, err := db.FindCodeByRedemptionToken(token)
 	if err != nil || canonical != lookupTestCode {
 		t.Fatal(canonical, err)
 	}

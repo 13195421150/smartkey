@@ -37,7 +37,7 @@ func setupLookupFixture(t *testing.T, f lookupFixture) {
 	for _, q := range []string{
 		`CREATE TABLE site_settings (key TEXT PRIMARY KEY, value TEXT, updated_at DATETIME)`,
 		`CREATE TABLE cd_keys (code TEXT, plan_type TEXT, status TEXT, used_at DATETIME, expires_at DATETIME)`,
-		`CREATE TABLE cardplatform_cdk_codes (upstream_id INTEGER, code TEXT, code_prefix TEXT, plan TEXT, status TEXT, created_at DATETIME)`,
+		`CREATE TABLE cardplatform_cdk_codes (upstream_id INTEGER, code TEXT UNIQUE, code_prefix TEXT, plan TEXT, status TEXT, created_at DATETIME)`,
 		`CREATE TABLE recharge_tasks (cdk_code TEXT, task_status TEXT, account_email TEXT, completed_at DATETIME, notes TEXT, created_at DATETIME)`,
 		`CREATE TABLE cdk_session_bindings (cdk_code TEXT PRIMARY KEY, redemption_token TEXT, session_payload TEXT, updated_at TEXT)`,
 		`CREATE TABLE cdk_attempt_diagnostics(cdk_code TEXT PRIMARY KEY,phase TEXT,request_id TEXT,error_code TEXT,message TEXT,uncertain INTEGER,started_at INTEGER,occurred_at TEXT)`,
@@ -45,6 +45,9 @@ func setupLookupFixture(t *testing.T, f lookupFixture) {
 		if _, err := conn.Exec(q); err != nil {
 			t.Fatal(err)
 		}
+	}
+	if err := db.InitCDKRotationSchema(); err != nil {
+		t.Fatal(err)
 	}
 	if f.stored == "" {
 		f.stored = "unused"

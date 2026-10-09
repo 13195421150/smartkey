@@ -193,3 +193,48 @@ func TestFailedIssuanceNeverReturnsHistoricalCodes(t *testing.T) {
 		})
 	}
 }
+
+func TestIssuancePassesPaymentRegionWithoutSitePreference(t *testing.T) {
+	issued := 0
+	setupAuditDB(t, func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/openapi/v1/gpt-direct/plans" && r.Method == "GET":
+			json.NewEncoder(w).Encode(map[string]any{"code": 0, "data": map[string]any{
+				"plans":           map[string]any{"plus": map[string]any{"enabled": true}},
+				"registry":        []map[string]any{{"key": "plus", "product": "gpt", "purchasable": true}},
+				"payment_regions": []map[string]any{{"country": "CL", "currency": "CLP"}},
+			}})
+		case r.URL.Path == "/openapi/v1/gpt-direct/cdks" && r.Method == "POST":
+			issued++
+			var body map[string]any
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Fatal(err)
+			}
+			if body["payment_country"] != "CL" {
+				t.Fatalf("payment country not forwarded: %#v", body)
+			}
+			if _, exists := body["preferred_segment_key"]; exists {
+				t.Fatalf("payment region must not invent a card preference: %#v", body)
+			}
+			json.NewEncoder(w).Encode(map[string]any{"code": 0, "data": map[string]any{
+				"requested": 1,
+				"issued": []map[string]any{{
+					"id": 91, "code": "ZC-AAAAAAAAAAAA-BBBBBBBBBBBB-CCCCCCCCCCCC", "plan": "plus",
+				}},
+			}})
+		default:
+			t.Errorf("unexpected upstream request: %s %s", r.Method, r.URL)
+			w.WriteHeader(http.StatusNotFound)
+		}
+	})
+
+	w := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(w)
+	ctx.Request = httptest.NewRequest("POST", "/issue", bytes.NewBufferString(`{"plan":"plus","count":1,"funding_confirmed":true,"payment_country":"cl"}`))
+	ctx.Request.Header.Set("Content-Type", "application/json")
+	ctx.Request.Header.Set("Idempotency-Key", "fixture-region-issue")
+	CardPlatformIssueCDKs(ctx)
+	if w.Code != http.StatusOK || issued != 1 {
+		t.Fatalf("region issuance failed: status=%d issues=%d body=%s", w.Code, issued, w.Body.String())
+	}
+}

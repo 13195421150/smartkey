@@ -80,6 +80,9 @@ func CardPlatformPlans(c *gin.Context) {
 		"base":    cardplatform.LoadConfig().SiteBase,
 		// 展示顺序/文案/性质仍以卡台注册表为准，前端不维护档位清单
 		"registry": sellable,
+		// 付款地区同理：卡台下发什么就能选什么，本站不写死。
+		// 老版本卡台没有这个字段 → 空数组 → 界面只剩「默认(PH)」，即本功能上线前的行为。
+		"payment_regions": plans.PaymentRegions,
 	})
 }
 
@@ -101,6 +104,11 @@ func CardPlatformIssueCDKs(c *gin.Context) {
 		Plan             string `json:"plan"`
 		Count            int    `json:"count"`
 		FundingConfirmed bool   `json:"funding_confirmed"`
+		// PaymentCountry 这批码兑换时用哪个地区付款。空 = 菲律宾（存量行为）。
+		// 不在本站校验取值：卡台的 payment_regions 是唯一真相源，
+		// 这里再校验一遍就等于多了一份会过期的清单。发了不支持的地区，
+		// 卡台会在发码这一步直接拒，错误原样透回给操作者。
+		PaymentCountry string `json:"payment_country"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request"})
@@ -164,7 +172,14 @@ func CardPlatformIssueCDKs(c *gin.Context) {
 	}
 	// 本站选卡配置 → 发码偏好（跳过未启动卡头；ch1 等历史写法会归一成 one）
 	var issuePrefs []cardplatform.IssueCardPref
-	if pref, ok := issuePrefFromSite(); ok {
+	pref, hasSitePref := issuePrefFromSite()
+	payCountry := strings.ToUpper(strings.TrimSpace(req.PaymentCountry))
+	// ★没有本站选卡配置时也要把地区带上★：地区和选卡偏好是两件独立的事，
+	// 用同一个 pref 结构只是顺路。写成「有选卡配置才传 pref」会让
+	// 「没配选卡、但指定了智利」这种组合静默退回菲律宾——码发出去了，
+	// 区却不对，而且一切正常无报错，直到用户兑换时按 PHP 扣了款才看得出来。
+	if hasSitePref || payCountry != "" {
+		pref.PaymentCountry = payCountry
 		issuePrefs = append(issuePrefs, pref)
 	}
 	var res *cardplatform.IssueCDKResult
@@ -185,6 +200,11 @@ func CardPlatformIssueCDKs(c *gin.Context) {
 	prefNote := ""
 	if len(issuePrefs) > 0 {
 		prefNote = " pref=" + issuePrefs[0].Issuer + "/" + issuePrefs[0].SegmentKey
+	}
+	// 地区进审计：这批码按哪个区发的，事后只能从这里查——
+	// 码本身在本站只存码文，地区留在卡台那边。
+	if payCountry != "" {
+		prefNote += " region=" + payCountry
 	}
 	db.WriteAudit(username, "cardplatform_issue_cdk", "plan="+plan+" count="+strconv.Itoa(req.Count)+prefNote, c.ClientIP())
 	// 规范化：保证前端总能拿到完整 code 字段；绝不把 code_prefix 填进 code
@@ -215,7 +235,12 @@ func CardPlatformIssueCDKs(c *gin.Context) {
 			storedOK = true
 		}
 		if storedOK {
-			code = cdkcode.Display(code, it.Plan)
+			site, err := db.SiteCDKFor(code, it.Plan)
+			if err != nil {
+				c.JSON(503, gin.H{"error": "暂无法读取本站卡密"})
+				return
+			}
+			code = site.Code
 			prefix = cdkcode.Display(prefix, it.Plan)
 		}
 		issued = append(issued, gin.H{
@@ -257,7 +282,12 @@ func CardPlatformSyncUpstreamCDKs(c *gin.Context) {
 	db.WriteAudit(username, "cardplatform_sync_cdk",
 		fmt.Sprintf("imported=%d prefix_only=%d scanned=%d", res.Imported, res.PrefixOnly, res.Scanned), c.ClientIP())
 	for i := range res.Codes {
-		res.Codes[i].Code = cdkcode.Display(res.Codes[i].Code, res.Codes[i].Plan)
+		site, err := db.SiteCDKFor(res.Codes[i].Code, res.Codes[i].Plan)
+		if err != nil {
+			c.JSON(503, gin.H{"error": "同步成功，但暂无法读取本站卡密，请刷新列表"})
+			return
+		}
+		res.Codes[i].Code = site.Code
 		res.Codes[i].CodePrefix = cdkcode.Display(res.Codes[i].CodePrefix, res.Codes[i].Plan)
 	}
 	msg := fmt.Sprintf("从卡台同步：新入库 %d 张，扫描 %d 张", res.Imported, res.Scanned)
@@ -357,7 +387,12 @@ func CardPlatformListStoredCDKs(c *gin.Context) {
 			if strings.TrimSpace(it.Code) == "" {
 				continue
 			}
-			b.WriteString(cdkcode.Display(it.Code, it.Plan))
+			site, err := db.SiteCDKFor(it.Code, it.Plan)
+			if err != nil {
+				c.JSON(503, gin.H{"error": "暂无法导出本站卡密"})
+				return
+			}
+			b.WriteString(site.Code)
 			b.WriteByte('\n')
 		}
 		c.Header("Content-Disposition", `attachment; filename="cdk-full-codes.txt"`)
@@ -419,9 +454,19 @@ func CardPlatformListStoredCDKs(c *gin.Context) {
 		if st == "" {
 			st = "unused"
 		}
+		site, err := db.SiteCDKFor(it.Code, it.Plan)
+		if err != nil {
+			c.JSON(503, gin.H{"error": "暂无法读取本站卡密"})
+			return
+		}
+		prefix := cdkcode.Display(it.CodePrefix, it.Plan)
+		if site.Generation > 0 {
+			prefix = site.Code[:strings.LastIndex(site.Code, "-")]
+		}
 		out = append(out, gin.H{
-			"id": it.UpstreamID, "code": cdkcode.Display(it.Code, it.Plan), "full_code": cdkcode.Display(it.Code, it.Plan),
-			"code_prefix": cdkcode.Display(it.CodePrefix, it.Plan), "plan": it.Plan, "status": st,
+			"id": it.UpstreamID, "code": site.Code, "full_code": site.Code,
+			"generation": site.Generation, "site_rotated": site.Generation > 0,
+			"code_prefix": prefix, "plan": it.Plan, "status": st,
 			"fee_amount_minor": it.FeeAmountMinor, "created_at": it.CreatedAt,
 			"has_full_code": true, "stored": true,
 			"note": notes[it.UpstreamID],
@@ -597,6 +642,9 @@ func CardPlatformListCDKs(c *gin.Context) {
 	ps, _ := strconv.Atoi(c.DefaultQuery("page_size", "20"))
 	cli := cardplatform.NewFromSettings()
 	plan, query := cdkcode.Search(c.Query("plan"), c.Query("q"))
+	if canonical, e := db.ResolveCDKCode(c.Query("q")); e == nil && canonical != "" {
+		query = canonical
+	}
 	res, err := cli.ListCDKsQuery(c.Request.Context(), cardplatform.CDKListQuery{
 		Page: page, PageSize: ps,
 		Status: c.Query("status"), Plan: plan, Query: query,
@@ -617,6 +665,8 @@ func CardPlatformListCDKs(c *gin.Context) {
 		FullCode       string `json:"full_code,omitempty"`
 		HasFullCode    bool   `json:"has_full_code"`
 		Note           string `json:"note,omitempty"`
+		Generation     int64  `json:"generation"`
+		SiteRotated    bool   `json:"site_rotated"`
 	}
 	ids := make([]int64, 0, len(res.List))
 	for _, it := range res.List {
@@ -641,10 +691,17 @@ func CardPlatformListCDKs(c *gin.Context) {
 		}
 		if ok {
 			if canAlias {
-				display := cdkcode.Display(full, it.Plan)
-				if _, err := db.ResolveCDKCode(display); err == nil {
-					full = display
-					row.CodePrefix = cdkcode.Display(row.CodePrefix, it.Plan)
+				site, err := db.SiteCDKFor(full, it.Plan)
+				if err != nil {
+					c.JSON(503, gin.H{"error": "暂无法读取本站卡密"})
+					return
+				}
+				full = site.Code
+				row.Generation = site.Generation
+				row.SiteRotated = site.Generation > 0
+				row.CodePrefix = cdkcode.Display(row.CodePrefix, it.Plan)
+				if site.Generation > 0 {
+					row.CodePrefix = full[:strings.LastIndex(full, "-")]
 				}
 			}
 			row.Code = full
@@ -938,6 +995,11 @@ func PublicCDKPreview(c *gin.Context) {
 	if !ok {
 		return
 	}
+	unlock := lockSiteCDK(code)
+	defer unlock()
+	if _, ok := resolveCDKInput(c, str(body["code"])); !ok {
+		return
+	}
 	cli := cardplatform.NewFromSettings()
 	st, raw, err := cli.Preview(c.Request.Context(), code, deviceFrom(c))
 	if err != nil {
@@ -948,14 +1010,21 @@ func PublicCDKPreview(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"code": 400, "error_code": "CDK_ALREADY_USED", "error": usedCDKMessage, "msg": usedCDKMessage})
 		return
 	}
-	// 成功时记下 code ↔ redemption_token，供后续绑定 session / 账单查卡密
 	if st >= 200 && st < 300 && !publicResponseFailed(st, raw) {
-		if tok := extractJSONString(raw, "redemption_token", "token"); tok != "" {
-			_ = db.BindCDKRedemptionToken(code, tok)
+		token := extractJSONString(raw, "redemption_token", "token")
+		if token == "" {
+			token = extractJSONNestedString(raw, "data", "redemption_token")
 		}
-		// 嵌套 data
-		if tok := extractJSONNestedString(raw, "data", "redemption_token"); tok != "" {
-			_ = db.BindCDKRedemptionToken(code, tok)
+		if token != "" {
+			siteToken, e := db.NewSiteCDKToken()
+			if e == nil {
+				e = db.BindCDKRedemptionToken(code, siteToken, token, deviceFrom(c))
+			}
+			if e != nil {
+				c.JSON(503, gin.H{"error": "兑换会话保存失败，请重新验证卡密"})
+				return
+			}
+			raw = publicSiteTokenJSON(raw, token, siteToken)
 		}
 	}
 	proxyPublicJSON(c, st, raw)
@@ -969,16 +1038,27 @@ func PublicCDKPreflight(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request"})
 		return
 	}
+	_, unlock, valid := lockSiteCDKToken(c, str(body["redemption_token"]))
+	if !valid {
+		return
+	}
+	defer unlock()
+	siteToken := str(body["redemption_token"])
+	upstreamToken, ok := siteUpstreamToken(c, siteToken)
+	if !ok {
+		return
+	}
+	body["redemption_token"] = upstreamToken
 	cli := cardplatform.NewFromSettings()
 	st, raw, err := cli.Preflight(c.Request.Context(), body, deviceFrom(c))
-	recordCDKAttempt(str(body["redemption_token"]), "preflight", body, st, raw, err, started)
+	recordCDKAttempt(siteToken, "preflight", body, st, raw, err, started)
 	if err != nil {
 		c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
 		return
 	}
 	// 预检成功：把 credential.session 绑到卡密（账单页可凭卡密查）
 	// 即便上游返回非 2xx，只要本地能解析到 session 也尽量落库，方便后续账单查询。
-	tok := str(body["redemption_token"])
+	tok := siteToken
 	if tok == "" {
 		tok = extractJSONString(raw, "redemption_token", "token")
 	}
@@ -991,7 +1071,7 @@ func PublicCDKPreflight(c *gin.Context) {
 	} else if st >= 200 && st < 300 {
 		log.Printf("[cdk-preflight] no session to bind (mode may be mailbox) tok=%s", shortTok(tok))
 	}
-	proxyPublicJSON(c, st, raw)
+	proxyPublicJSON(c, st, publicSiteTokenJSON(raw, upstreamToken, siteToken))
 }
 
 // PublicCDKRedeem POST /api/v1/public/cdk/redeem
@@ -1002,6 +1082,11 @@ func PublicCDKRedeem(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request"})
 		return
 	}
+	canonical, unlock, valid := lockSiteCDKToken(c, str(body["redemption_token"]))
+	if !valid {
+		return
+	}
+	defer unlock()
 	// 有选卡配置就向卡台声明 strict，避免被卡台自己的 537872/星链级联盖过。
 	injectRedeemCardPolicy(body)
 	// 本站坏卡黑名单 → 本单排除这些卡：CDK 走 CDK 自己的选卡规则。实时读黑名单、纯选卡维度
@@ -1026,14 +1111,28 @@ func PublicCDKRedeem(c *gin.Context) {
 		}
 		body["exclude_card_ids"] = ids
 	}
+	siteToken := str(body["redemption_token"])
+	upstreamToken, ok := siteUpstreamToken(c, siteToken)
+	if !ok {
+		return
+	}
+	body["redemption_token"] = upstreamToken
 	cli := cardplatform.NewFromSettings()
+	if err := db.MarkSiteCDKSubmitted(canonical, siteToken); err != nil {
+		c.JSON(503, gin.H{"error": "暂无法保存兑换请求，请稍后重试"})
+		return
+	}
 	st, raw, err := cli.Redeem(c.Request.Context(), body, deviceFrom(c))
-	recordCDKAttempt(str(body["redemption_token"]), "redeem", body, st, raw, err, started)
+	recordCDKAttempt(siteToken, "redeem", body, st, raw, err, started)
 	if err != nil {
 		c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
 		return
 	}
-	proxyPublicJSON(c, st, raw)
+	if publicResponseFailed(st, raw) && st < 500 && st != 408 && st != 409 {
+		_ = db.ClearSiteCDKSubmitted(siteToken)
+	}
+	observeSiteTokenResult(siteToken, st, raw)
+	proxyPublicJSON(c, st, publicSiteTokenJSON(raw, upstreamToken, siteToken))
 }
 
 // PublicCDKResult GET /api/v1/public/cdk/result?token=
@@ -1043,12 +1142,23 @@ func PublicCDKResult(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "token required"})
 		return
 	}
+	_, unlock, valid := lockSiteCDKToken(c, token)
+	if !valid {
+		return
+	}
+	defer unlock()
+	upstreamToken, ok := siteUpstreamToken(c, token)
+	if !ok {
+		return
+	}
 	cli := cardplatform.NewFromSettings()
-	st, raw, err := cli.Result(c.Request.Context(), token, deviceFrom(c))
+	st, raw, err := cli.Result(c.Request.Context(), upstreamToken, deviceFrom(c))
 	if err != nil {
 		c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
 		return
 	}
+	observeSiteTokenResult(token, st, raw)
+	raw = publicSiteTokenJSON(raw, upstreamToken, token)
 	// 卡健康观察（best-effort，不阻断用户）
 	if st >= 200 && st < 300 {
 		var payload map[string]any
@@ -1090,12 +1200,26 @@ func PublicCDKResultByCode(c *gin.Context) {
 		})
 		return
 	}
+	_, unlock, valid := lockSiteCDKToken(c, bind.RedemptionToken)
+	if !valid {
+		return
+	}
+	defer unlock()
+	if _, ok := resolveCDKInput(c, displayCode); !ok {
+		return
+	}
+	upstreamToken, ok := siteUpstreamToken(c, bind.RedemptionToken)
+	if !ok {
+		return
+	}
 	cli := cardplatform.NewFromSettings()
-	st, raw, err := cli.Result(c.Request.Context(), bind.RedemptionToken, deviceFrom(c))
+	st, raw, err := cli.Result(c.Request.Context(), upstreamToken, deviceFrom(c))
 	if err != nil {
 		c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
 		return
 	}
+	observeSiteTokenResult(bind.RedemptionToken, st, raw)
+	raw = publicSiteTokenJSON(raw, upstreamToken, bind.RedemptionToken)
 	// 附带本站元信息，前端可恢复轮询 token
 	var payload map[string]any
 	if json.Unmarshal(raw, &payload) != nil || payload == nil {
@@ -1154,12 +1278,13 @@ const docsDefaultNote = "★这是文档默认兜底价，不是你的账户实�
 // docsDefaultRegistry 未配置 API Key / 卡台不可达时的参考价目表。
 //
 // ★点数必须带上 checkout_amount_minor★：点数的 $0.10 只是我们的服务费，
-// 代理真正要垫的是那笔比索付款（₱565/₱1130/₱2260）。只列服务费的话，
-// 代理会把「一张 ₱2260 的码」当成一毛钱的东西发出去。
+// 代理真正要垫的是那笔比索付款（₱565 … ₱56,500）。只列服务费的话，
+// 代理会把「一张 ₱56,500 的码」当成一毛钱的东西发出去。
 func docsDefaultRegistry() []cardplatform.SellablePlan {
 	return []cardplatform.SellablePlan{
 		{Key: "plus", Label: "Plus", Flow: "direct", SortOrder: 2, ServiceFeeUsdMinor: 100, ServiceFeeUSD: 1},
 		{Key: "pro_5x", Label: "Pro 5x", Flow: "direct", SortOrder: 3, ServiceFeeUsdMinor: 500, ServiceFeeUSD: 5},
+		{Key: "pro_50x", Label: "Pro 50x", Flow: "direct", SortOrder: 5, ServiceFeeUsdMinor: 1000, ServiceFeeUSD: 10},
 		{Key: "pro_20x", Label: "Pro", Flow: "plus_upgrade", SortOrder: 4, ServiceFeeUsdMinor: 1000, ServiceFeeUSD: 10},
 		{Key: "credit250", Label: "Codex 点数 250", Flow: "credit", SortOrder: 5, IsCredit: true,
 			RequiresActiveSubscription: true, ServiceFeeUsdMinor: 10, ServiceFeeUSD: 0.1,
@@ -1170,6 +1295,18 @@ func docsDefaultRegistry() []cardplatform.SellablePlan {
 		{Key: "credit1000", Label: "Codex 点数 1000", Flow: "credit", SortOrder: 7, IsCredit: true,
 			RequiresActiveSubscription: true, ServiceFeeUsdMinor: 10, ServiceFeeUSD: 0.1,
 			CheckoutCurrency: "PHP", CheckoutAmountMinor: 226000},
+		// 大额三档（2026-09-26 加）。菲区点数线性按件计价：₱2.26 × 数量。
+		// 服务费 15 = 卡台注册表现值；上面三档写 10 是历史漂移，本次不动。
+		// ★25000 档代理要垫 ₱56,500（约 $900+）★，别当成一毛钱的码发出去。
+		{Key: "credit2500", Label: "Codex 点数 2500", Flow: "credit", SortOrder: 8, IsCredit: true,
+			RequiresActiveSubscription: true, ServiceFeeUsdMinor: 15, ServiceFeeUSD: 0.15,
+			CheckoutCurrency: "PHP", CheckoutAmountMinor: 565000},
+		{Key: "credit5000", Label: "Codex 点数 5000", Flow: "credit", SortOrder: 9, IsCredit: true,
+			RequiresActiveSubscription: true, ServiceFeeUsdMinor: 15, ServiceFeeUSD: 0.15,
+			CheckoutCurrency: "PHP", CheckoutAmountMinor: 1130000},
+		{Key: "credit25000", Label: "Codex 点数 25000", Flow: "credit", SortOrder: 10, IsCredit: true,
+			RequiresActiveSubscription: true, ServiceFeeUsdMinor: 15, ServiceFeeUSD: 0.15,
+			CheckoutCurrency: "PHP", CheckoutAmountMinor: 5650000},
 	}
 }
 

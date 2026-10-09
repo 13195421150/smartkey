@@ -228,7 +228,11 @@ func lookupOneCDK(ctx context.Context, code, deviceID string) (resp cdkLookupRes
 	}
 	// Legacy/imported bindings can still use the device-bound public result endpoint.
 	if binding != nil && strings.TrimSpace(binding.RedemptionToken) != "" {
-		status, raw, err := cli.Result(ctx, binding.RedemptionToken, deviceID)
+		upstreamToken, tokenErr := db.UpstreamCDKToken(binding.RedemptionToken)
+		if tokenErr != nil {
+			return resp
+		}
+		status, raw, err := cli.Result(ctx, upstreamToken, deviceID)
 		if err == nil && status >= 200 && status < 300 {
 			if order := publicLookupOrder(raw); order != nil {
 				applyLookupOrder(&resp, order)
