@@ -16,27 +16,13 @@
         </div>
       </div>
       <div class="flex flex-wrap gap-2">
-        <el-popover placement="bottom-end" :width="420" trigger="click">
-          <template #reference>
-            <el-button size="small">代理换码</el-button>
-          </template>
-          <div class="space-y-2">
-            <div class="text-sm font-medium text-ink">代理换码页</div>
-            <p class="text-xs text-muted">失败且未扣款的卡密可换新码，需在卡台接入里设置代理密码。</p>
-            <div class="mono text-xs break-all">{{ agentSwapUrl }}</div>
-            <div class="flex gap-2">
-              <el-button type="primary" size="small" @click="copyText(agentSwapUrl)">复制链接</el-button>
-              <el-button size="small" @click="openAgentSwap">打开</el-button>
-            </div>
-          </div>
-        </el-popover>
         <router-link to="/ops/integration" class="btn-secondary !py-1.5 !px-3 text-sm">卡台配置</router-link>
         <el-button size="small" :loading="loadingMeta" @click="refreshAll">刷新</el-button>
       </div>
     </div>
 
     <div v-if="metaError" class="alert alert-error">{{ metaError }}</div>
-    <p class="text-xs text-muted">本站复制与导出前缀：Plus 为 PLUS-，Pro5x 为 Pro5X-，Pro20x 为 Pro20X-。自定义码仅在本站兑换；原 ZC- 码仍可用，两者共用一次兑换额度。</p>
+    <p class="text-xs text-muted">本站复制与导出前缀：Plus 为 PLUS-，Pro5x 为 Pro5X-，Pro20x 为 Pro20X-。自定义码仅在本站兑换；卡密换新后，旧码及原 ZC- 码在本站立即失效，仍关联同一张卡台 CDK。</p>
     <el-button v-if="!configured" type="warning" size="small" @click="router.push('/ops/integration')">
       去配置 API Key
     </el-button>
@@ -57,26 +43,43 @@
             type="button"
             class="plan-card-sm"
             :class="{ 'plan-card-sm--on': form.plan === p.key }"
+            :disabled="pendingAttemptActive"
             @click="selectPlan(p.key)"
           >
             <span class="font-medium">{{ p.label }}</span>
             <span class="mono text-ink">${{ formatUsd(p.service_fee_usd) }}</span>
             <!-- 点数是比索计价：兑换时代理要垫这笔付款，不写出来会被当成只花 $0.10 -->
-            <small v-if="p.checkoutText" class="text-xs text-muted">兑换垫付 {{ p.checkoutText }}</small>
+            <small v-if="p.checkoutText && (!form.payment_country || form.payment_country === 'PH')" class="text-xs text-muted">
+              默认菲区垫付 {{ p.checkoutText }}
+            </small>
+            <small v-else-if="p.checkoutText" class="text-xs text-muted">所选地区垫付金额以卡台结算为准</small>
           </button>
         </div>
         <div class="flex flex-wrap items-center gap-3">
           <span class="text-sm text-muted">数量</span>
-          <el-button size="small" :disabled="form.count <= 1" @click="form.count = Math.max(1, form.count - 1)">−</el-button>
-          <input v-model.number="form.count" type="number" min="1" :max="ISSUE_MAX" class="input !w-20 text-center mono" />
-          <el-button size="small" :disabled="form.count >= ISSUE_MAX" @click="form.count = Math.min(ISSUE_MAX, form.count + 1)">+</el-button>
+          <el-button size="small" :disabled="pendingAttemptActive || form.count <= 1" @click="form.count = Math.max(1, form.count - 1)">−</el-button>
+          <input v-model.number="form.count" type="number" min="1" :max="ISSUE_MAX" :disabled="pendingAttemptActive" class="input !w-20 text-center mono" />
+          <el-button size="small" :disabled="pendingAttemptActive || form.count >= ISSUE_MAX" @click="form.count = Math.min(ISSUE_MAX, form.count + 1)">+</el-button>
           <el-button-group>
-            <el-button size="small" @click="form.count = 1">1</el-button>
-            <el-button size="small" @click="form.count = 10">10</el-button>
-            <el-button size="small" @click="form.count = 50">50</el-button>
-            <el-button size="small" @click="form.count = 100">100</el-button>
-            <el-button size="small" @click="form.count = ISSUE_MAX">200</el-button>
+            <el-button size="small" :disabled="pendingAttemptActive" @click="form.count = 1">1</el-button>
+            <el-button size="small" :disabled="pendingAttemptActive" @click="form.count = 10">10</el-button>
+            <el-button size="small" :disabled="pendingAttemptActive" @click="form.count = 50">50</el-button>
+            <el-button size="small" :disabled="pendingAttemptActive" @click="form.count = 100">100</el-button>
+            <el-button size="small" :disabled="pendingAttemptActive" @click="form.count = ISSUE_MAX">200</el-button>
           </el-button-group>
+          <span class="text-sm text-muted">付款地区</span>
+          <!-- placeholder 必须显式给：Element Plus 不把空字符串当「已选中」，
+               所以未选时不会显示下面那条 value="" 的选项，而是回落到内置英文
+               placeholder「Select」——中文界面里突兀，更要命的是「不选就是菲律宾」
+               这个信息在下拉展开前完全看不到，操作者会以为自己还没选地区。 -->
+          <el-select v-model="form.payment_country" size="small" style="width: 150px"
+                     placeholder="默认(菲律宾)" :disabled="pendingAttemptActive">
+            <el-option label="默认(菲律宾)" value="" />
+            <el-option v-if="pendingPaymentRegion && !paymentRegions.some(r => r.country === pendingPaymentRegion)"
+                       :label="`${regionLabel(pendingPaymentRegion)}（待确认请求）`" :value="pendingPaymentRegion" />
+            <el-option v-for="r in paymentRegions" :key="r.country"
+                       :label="`${regionLabel(r.country)} (${r.currency})`" :value="r.country" />
+          </el-select>
           <el-checkbox v-model="form.funding_confirmed">确认承担兑换资金</el-checkbox>
           <el-button type="primary" :loading="issuing" :disabled="!canIssue" @click="issue">
             {{ issuing ? '购买中…' : `购买 ${form.count} 张 ${planLabel(form.plan)} · $${estimatedTotal}` }}
@@ -84,13 +87,20 @@
         </div>
         <p v-if="!configured" class="text-xs" style="color: var(--err)">请先在「卡台配置」填写 Base 与 sk_</p>
         <p v-else-if="!form.funding_confirmed" class="text-xs text-muted">勾选「确认承担兑换资金」后再购买。实付由本账户承担，服务费从卡台余额扣除。</p>
+        <div v-if="pendingAttemptActive && !planKeys.includes(pendingPaymentPlan)" class="alert alert-error">
+          上一笔待确认请求的套餐已不在当前可卖清单，无法自动重试。请先到卡台核对结果，勿重新购买。
+        </div>
         <div v-if="issueError" class="alert alert-error">{{ issueError }}</div>
         <div v-if="issueOk" class="alert alert-success">{{ issueOk }}</div>
         <div v-if="recentCodes.length" class="rounded-xl bg-soft p-3 space-y-2 border" style="border-color: var(--good)">
           <div class="flex flex-wrap items-center justify-between gap-2">
             <div class="text-sm font-medium" style="color: var(--good)">
               本批 {{ recentCodes.length }} 张
-              <span v-if="recentMeta" class="text-xs text-muted font-normal"> · {{ recentMeta.plan }} · {{ recentMeta.atLabel }}</span>
+              <span v-if="recentMeta" class="text-xs text-muted font-normal">
+                · {{ recentMeta.plan }}
+                · {{ recentMeta.region ? regionLabel(recentMeta.region) : '默认(菲律宾)' }}
+                · {{ recentMeta.atLabel }}
+              </span>
             </div>
             <div class="flex gap-1">
               <el-button size="small" type="success" @click="copyAll">复制</el-button>
@@ -272,6 +282,7 @@
               <template #dropdown>
                 <el-dropdown-menu>
                   <el-dropdown-item command="copy" :disabled="!row.fullCode">复制完整码</el-dropdown-item>
+                  <el-dropdown-item v-if="canRotateRow(row)" command="rotate" :disabled="rotating">卡密换新</el-dropdown-item>
                   <el-dropdown-item command="note" :disabled="!row.id">编辑备注</el-dropdown-item>
                   <el-dropdown-item v-if="canDisableRow(row)" command="disable" divided>禁用</el-dropdown-item>
                   <el-dropdown-item v-if="canEnableRow(row)" command="enable">解除禁用</el-dropdown-item>
@@ -308,6 +319,7 @@ import { beginIssue, finishIssue, pendingIssue } from '../../lib/issue-request'
 import { authFetch } from '../../lib/api'
 import { dialog } from '../../lib/dialog'
 import { copyToClipboard } from '../../lib/clipboard'
+import { canRotateCDK } from '../../lib/cdk-rotation'
 
 const RECENT_KEY = 'cdk_recent_issued_v1'
 /** 浏览器兜底缓存（历史本机数据）；主存储已改为服务器 SQLite */
@@ -315,10 +327,6 @@ const CODE_CACHE_KEY = 'cdk_full_code_cache_v1'
 /** 卡台完整码形如 GPTD-xxxxxxxxxxxx-xxxxxxxxxxxx-xxxxxxxxxxxx（约 43 字符） */
 const FULL_CODE_MIN_LEN = 20
 const ISSUE_MAX = 200
-/** 代理换码隐藏页（完整 URL，便于复制发给代理） */
-const agentSwapUrl =
-  typeof window !== 'undefined' ? `${window.location.origin}/partner/swap` : '/partner/swap'
-
 type CodeCacheEntry = { code: string; plan?: string; prefix?: string; at?: number; id?: number }
 /** id -> entry；prefix -> entry（仅作兜底 / 回填服务器） */
 const codeCache = ref<Record<string, CodeCacheEntry>>({})
@@ -326,6 +334,8 @@ const storeStats = reactive({ fullOnPage: null as number | null, fullInStore: nu
 const syncingCache = ref(false)
 const syncingUpstream = ref(false)
 const exportingAll = ref(false)
+const rotating = ref(false)
+const rotationRequests = new Map<string, string>()
 const disabling = ref(false)
 const noting = ref(false)
 /** stored = 本站完整码库（默认可复制导出）；upstream = 卡台状态列表 */
@@ -347,12 +357,31 @@ const form = reactive({
   plan: 'plus',
   count: 1,
   funding_confirmed: false,
+  // 空 = 菲律宾（存量行为）。空和 'PH' 在这里是两件事，界面上也分开显示：
+  // 将来卡台若改默认地区，「没指定」和「明确指定了 PH」该走不同的路。
+  payment_country: '',
 })
+// ★地区清单只认卡台下发的 payment_regions★，本站不写死。
+// 写死的那份和卡台的校验表迟早不一致，而不一致时两边都不报错：
+// 多出来的地区发码被拒，少了的地区卡台支持了却选不到。
+const paymentRegions = ref<Array<{ country: string; currency: string }>>([])
+const pendingAttemptActive = ref(false)
+const pendingPaymentPlan = ref('')
+const pendingPaymentRegion = ref('')
+const REGION_NAMES: Record<string, string> = {
+  PH: '菲律宾', US: '美国', JP: '日本', CL: '智利', EG: '埃及', IN: '印度', KR: '韩国',
+}
+// 没收录的国家码原样显示——比显示空白好，新地区不必等这份表补齐就能用。
+function regionLabel(code: string): string {
+  return REGION_NAMES[code] || code
+}
 const issuing = ref(false)
 const issueError = ref('')
 const issueOk = ref('')
 const recentCodes = ref<string[]>([])
-const recentMeta = ref<{ plan: string; atLabel: string } | null>(null)
+// region 一并记下来：整批码是复制出去卖的，事后只能从这条横幅确认
+// 「刚买的这 200 张到底是哪个区的」——码文本身看不出地区。
+const recentMeta = ref<{ plan: string; atLabel: string; region: string } | null>(null)
 
 const rows = ref<any[]>([])
 const total = ref(0)
@@ -408,7 +437,8 @@ const canIssue = computed(() =>
 
 // 可卖清单变了（首次加载 / 卡台改了配置）就把选中项收回到清单内。
 watch(planKeys, (keys) => {
-  if (keys.length && !keys.includes(form.plan)) form.plan = keys[0]
+  const isPendingPlan = pendingAttemptActive.value && form.plan === pendingPaymentPlan.value
+  if (keys.length && !keys.includes(form.plan) && !isPendingPlan) form.plan = keys[0]
 })
 
 /** 列表行：合并服务器 full_code + 本机兜底缓存 */
@@ -432,6 +462,8 @@ const selectedFullCodes = computed(() =>
   selectedRows.value.map((r) => String(r.fullCode || lookupFullCode(r) || '').trim()).filter((c) => isFullCode(c)),
 )
 const fullSelectableCount = computed(() => displayRows.value.filter((r) => !!r.fullCode).length)
+
+function canRotateRow(row: any) { return canRotateCDK(row) }
 
 /** 可禁用：有 id 且状态为 unused */
 function canDisableRow(row: any) {
@@ -507,6 +539,7 @@ function onBatchCommand(cmd: string) {
 }
 
 function onRowCommand(cmd: string, row: any) {
+  if (cmd === 'rotate') return rotateOne(row)
   if (cmd === 'copy') return copyRowCode(row)
   if (cmd === 'note') return editNoteOne(row)
   if (cmd === 'disable') return disableOne(row)
@@ -604,6 +637,40 @@ async function exportAllStored() {
     dialog.toast(e?.message || '导出失败', 'err')
   } finally {
     exportingAll.value = false
+  }
+}
+
+async function rotateOne(row: any) {
+  if (!canRotateRow(row) || rotating.value) return
+  const id = Number(row.id)
+  const generation = Number(row.generation || 0)
+  const ok = await dialog.confirm(`确定更换 ID ${id} 的本站卡密？旧码及旧兑换会话将立即失效。卡台映射、ID、任务、失败原因和使用状态均保持不变。`, {
+    title: '卡密换新', okText: '确认换新', danger: true,
+  })
+  if (!ok || rotating.value) return
+  const requestKey = `${id}:${generation}`
+  const requestID = rotationRequests.get(requestKey) || crypto.randomUUID()
+  rotationRequests.set(requestKey, requestID)
+  rotating.value = true
+  try {
+    const r = await authFetch(`/api/v1/admin/cardplatform/cdks/${id}/rotate`, {
+      method: 'POST', body: JSON.stringify({ client_request_id: requestID, generation }),
+    })
+    const d = await r.json()
+    if (!r.ok) throw new Error(d.error || d.msg || '换新失败，请刷新状态后重试')
+    const next = { ...row, ...d, code_prefix: d.code.slice(0, d.code.lastIndexOf('-')) }
+    const index = rows.value.findIndex((item: any) => Number(item.id) === id)
+    if (index >= 0) rows.value[index] = { ...rows.value[index], ...next }
+    for (const [key, entry] of Object.entries(codeCache.value)) {
+      if (Number(entry.id) === id) delete codeCache.value[key]
+    }
+    rememberIssued([next], row.plan)
+    rotationRequests.delete(requestKey)
+    await dialog.alert(`新卡密：${d.code}\n\n旧卡密已在本站作废，可在此行操作菜单复制新码。`, { title: '卡密换新成功' })
+  } catch (e: any) {
+    dialog.toast(e?.message || '换新结果未确认，请重试同一次操作', 'err')
+  } finally {
+    rotating.value = false
   }
 }
 
@@ -971,6 +1038,7 @@ function lookupFullCode(row: any): string {
   // 优先服务器列表补全的 full_code / code
   const direct = extractFullCode(row)
   if (direct) return direct
+  if (row.site_rotated) return ''
   // 兜底：浏览器旧缓存（历史未落库的码）
   const id = row.id != null ? String(row.id) : ''
   const prefix = String(row.code_prefix || '').trim()
@@ -1054,8 +1122,8 @@ async function syncFromCardplatform(opts?: { quiet?: boolean; plan?: string; sta
   }
 }
 
-function persistRecent(codes: string[], plan: string) {
-  const payload = { codes, plan, at: Date.now() }
+function persistRecent(codes: string[], plan: string, region = '') {
+  const payload = { codes, plan, at: Date.now(), region }
   try {
     sessionStorage.setItem(RECENT_KEY, JSON.stringify(payload))
   } catch {
@@ -1064,6 +1132,7 @@ function persistRecent(codes: string[], plan: string) {
   recentMeta.value = {
     plan,
     atLabel: new Date(payload.at).toLocaleString(),
+    region,
   }
 }
 
@@ -1078,6 +1147,7 @@ function loadPersistedRecent() {
     recentMeta.value = {
       plan: String(o.plan || '—'),
       atLabel: o.at ? new Date(o.at).toLocaleString() : '—',
+      region: String(o.region || ''),
     }
   } catch {
     /* ignore */
@@ -1095,9 +1165,7 @@ function clearRecent() {
   dialog.toast('已清除本批完整码缓存', 'info')
 }
 
-function openAgentSwap() {
-  window.open(agentSwapUrl, '_blank')
-}
+
 
 async function copyText(t: string) {
   const ok = await copyToClipboard(t)
@@ -1146,6 +1214,15 @@ async function loadMeta() {
       plans.value = d.plans || {}
       // 服务端已按「卡台注册表 ∩ ACC 定价开关」过滤，这里拿到什么就显示什么
       planRegistry.value = d.registry || []
+      paymentRegions.value = Array.isArray(d.payment_regions)
+        ? d.payment_regions.map((r: any) => ({ country: String(r.country || ''), currency: String(r.currency || '') }))
+            .filter((r: any) => r.country && r.currency)
+        : []
+      // 卡台不再下发某个地区时，把已选中的收回到「默认」——
+      // 否则表单会一直带着一个卡台已经不认的国家码，发码时才被拒。
+      if (form.payment_country && !paymentRegions.value.some(r => r.country === form.payment_country)) {
+        form.payment_country = pendingAttemptActive.value ? pendingPaymentRegion.value : ''
+      }
       pricingVersion.value = d.version ?? null
       priceSource.value = 'live'
     } else {
@@ -1155,6 +1232,13 @@ async function loadMeta() {
       // 也不知道 ACC 的开关状态，照着它发码就是在赌。清空 + 上面的报错更诚实。
       plans.value = {}
       planRegistry.value = []
+      // ★地区同理，别把上一次的清单留在下拉里★
+      // 漏清的后果比看上去严重：档位空了、红字也弹了，但地区下拉还挂着上次的
+      // PH/US/JP/CL/EG。操作者会以为「只是价格没刷出来，地区还是对的」，
+      // 而此刻卡台到底还认不认这些地区，本站根本不知道——清单本来就是它下发的。
+      // 已选中的一并收回「默认」，与成功分支里那条「卡台下线某地区就收回」同一口径。
+      paymentRegions.value = []
+      form.payment_country = pendingAttemptActive.value ? pendingPaymentRegion.value : ''
       priceSource.value = 'unavailable'
     }
     if (br.ok) {
@@ -1163,6 +1247,11 @@ async function loadMeta() {
     }
   } catch (e: any) {
     metaError.value = e?.message || '网络错误'
+    plans.value = {}
+    planRegistry.value = []
+    paymentRegions.value = []
+    form.payment_country = pendingAttemptActive.value ? pendingPaymentRegion.value : ''
+    priceSource.value = 'unavailable'
   } finally {
     loadingMeta.value = false
   }
@@ -1174,9 +1263,14 @@ async function issue() {
   if (!canIssue.value) return
   const purchasePlan = form.plan
   const purchaseCount = form.count
+  const purchaseRegion = form.payment_country
   issuing.value = true
+  let purchaseConfirmed = false
   try {
-    const requestKey = beginIssue(purchasePlan, purchaseCount)
+    const requestKey = beginIssue(purchasePlan, purchaseCount, purchaseRegion)
+    pendingAttemptActive.value = true
+    pendingPaymentPlan.value = purchasePlan
+    pendingPaymentRegion.value = purchaseRegion.trim().toUpperCase()
     const r = await authFetch('/api/v1/admin/cardplatform/cdks', {
       method: 'POST',
       headers: { 'Idempotency-Key': requestKey },
@@ -1184,11 +1278,19 @@ async function issue() {
         plan: purchasePlan,
         count: purchaseCount,
         funding_confirmed: true,
+        // 只传国家，币种由卡台按它的唯一真相源补。本站猜币种猜错的话，
+        // 卡台会回「付款地区与币种不匹配」——一句完全指不到真因的话。
+        payment_country: purchaseRegion || '',
       }),
     })
     const d = await r.json().catch(() => ({}))
     if (!r.ok) {
-      if (r.status >= 400 && r.status < 500 && ![408, 409, 429].includes(r.status)) finishIssue()
+      if (r.status >= 400 && r.status < 500 && ![408, 409, 429].includes(r.status)) {
+        finishIssue()
+        pendingAttemptActive.value = false
+        pendingPaymentPlan.value = ''
+        pendingPaymentRegion.value = ''
+      }
       const msg = d.error || d.msg || '发码失败'
       issueError.value = msg
       if (String(msg).includes('403') || d.code === 403) {
@@ -1203,11 +1305,15 @@ async function issue() {
       recentCodes.value = []
       return
     }
+    purchaseConfirmed = true
     finishIssue()
+    pendingAttemptActive.value = false
+    pendingPaymentPlan.value = ''
+    pendingPaymentRegion.value = ''
     // 浏览器兜底 + 列表以服务器为准
     rememberIssued(issued, purchasePlan)
     recentCodes.value = codes
-    persistRecent(codes, purchasePlan)
+    persistRecent(codes, purchasePlan, purchaseRegion)
     issueOpen.value = true
     const shortOnes = codes.filter((c) => !isFullCode(c))
     const storedN = Number(d.stored_count)
@@ -1231,7 +1337,12 @@ async function issue() {
     await loadList()
     await loadMeta()
   } catch (e) {
-    issueError.value = `${e instanceof Error ? e.message : '请求未完成'}。结果尚未确认，请保持原套餐与数量重试；系统会复用同一个请求。`
+    const detail = e instanceof Error ? e.message : '请求未完成'
+    if (purchaseConfirmed) {
+      issueError.value = `发码已确认，但页面后续处理失败：${detail}。请勿重复购买，可手动刷新列表。`
+    } else {
+      issueError.value = `${detail}。结果尚未确认，请保持原套餐、数量和地区重试；系统会复用同一个请求。`
+    }
   } finally {
     issuing.value = false
   }
@@ -1324,7 +1435,16 @@ async function refreshAll() {
 onMounted(async () => {
   try {
     const pending = pendingIssue()
-    if (pending) { form.plan = pending.plan; form.count = pending.count; issueOpen.value = true; issueError.value = '上一笔购买结果尚未确认，已恢复原套餐与数量。重试会复用同一个请求。' }
+    if (pending) {
+      form.plan = pending.plan
+      form.count = pending.count
+      form.payment_country = pending.region
+      pendingAttemptActive.value = true
+      pendingPaymentPlan.value = pending.plan
+      pendingPaymentRegion.value = pending.region
+      issueOpen.value = true
+      issueError.value = '上一笔购买结果尚未确认，已恢复原套餐、数量和地区；档位仍在售时，重试会复用同一个请求。若档位已下线，请到卡台核对，勿重新购买。'
+    }
   } catch { issueError.value = '无法读取上一次购买状态，请先核对卡台记录。' }
 
   loadCodeCache()

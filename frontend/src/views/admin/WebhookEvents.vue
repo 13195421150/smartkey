@@ -83,7 +83,7 @@ import { onMounted, ref } from 'vue'
 import { authFetch } from '../../lib/api'
 import { dialog } from '../../lib/dialog'
 
-const webhookUrl = ref(`${window.location.origin}/api/v1/webhooks/cardplatform`)
+const webhookUrl = ref('https://gptcdk.ai/api/v1/webhooks/cardplatform')
 const secretSet = ref(false)
 const secretHint = ref('未配置')
 const secretInput = ref('')
