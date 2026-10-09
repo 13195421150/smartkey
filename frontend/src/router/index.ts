@@ -14,7 +14,6 @@ const routes: RouteRecordRaw[] = [
       { path: 'history', name: 'CDKStatusLookup', component: () => import('../views/user/CDKStatusView.vue') },
       { path: 'billing', name: 'BillingCheck', component: () => import('../views/user/BillingCheckView.vue') },
       { path: 'tutorial', name: 'Tutorial', component: () => import('../views/user/TutorialView.vue') },
-      { path: 'partner/swap', name: 'AgentCDKSwap', component: () => import('../views/user/AgentSwapView.vue') },
     ],
   },
   // 旧登录路径 → 隐蔽入口
@@ -45,10 +44,6 @@ const routes: RouteRecordRaw[] = [
   {
     path: '/lookup',
     redirect: '/history',
-  },
-  {
-    path: '/a/swap',
-    redirect: '/partner/swap',
   },
   {
     path: OPS_BASE,
