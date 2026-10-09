@@ -142,12 +142,12 @@ func setupRoutes(r *gin.Engine) {
 			pubCDK.GET("/plans", handler.PublicCDKPlans)
 			pubCDK.POST("/preview", handler.PublicCDKPreview)
 			pubCDK.POST("/preflight", handler.PublicCDKPreflight)
+			pubCDK.POST("/recover-subscription", handler.PublicCDKGraceRecovery)
 			pubCDK.POST("/redeem", handler.PublicCDKRedeem)
 			pubCDK.GET("/result", handler.PublicCDKResult)
 			// 刷新进度 / 任务查询：凭卡密反查本站绑定的 redemption_token
 			pubCDK.GET("/result-by-code", handler.PublicCDKResultByCode)
-			// 代理隐藏换码：密码 + 失败未扣款 CDK → 新码
-			pubCDK.POST("/exchange", handler.PublicAgentCDKExchange)
+			pubCDK.Any("/exchange", retiredAgentExchange)
 		}
 
 		// 卡密状态查询：是否已用 + 充值邮箱（不返回 token）
@@ -197,6 +197,7 @@ func setupRoutes(r *gin.Engine) {
 			admin.POST("/cardplatform/cdks/batch-note", handler.CardPlatformBatchSetCDKNote)
 			admin.POST("/cardplatform/cdks/batch-clear-note", handler.CardPlatformBatchClearCDKNote)
 			admin.PUT("/cardplatform/cdks/:id/note", handler.CardPlatformSetCDKNote)
+			admin.POST("/cardplatform/cdks/:id/rotate", handler.CardPlatformRotateCDK)
 			admin.POST("/cardplatform/cdks/:id/disable", handler.CardPlatformDisableCDK)
 			admin.POST("/cardplatform/cdks/:id/enable", handler.CardPlatformEnableCDK)
 			admin.GET("/cardplatform/cdk-orders", handler.CardPlatformListCDKOrders)
@@ -235,6 +236,11 @@ func setupRoutes(r *gin.Engine) {
 		}
 	}
 
+	r.Any("/partner/swap", retiredAgentExchange)
+	r.Any("/partner/swap/*rest", retiredAgentExchange)
+	r.Any("/a/swap", retiredAgentExchange)
+	r.Any("/a/swap/*rest", retiredAgentExchange)
+
 	// 托管前端 SPA（当设置了 WEB_DIR 时）：真实存在的文件直出，其余回退到 index.html
 	if webDir != "" {
 		indexFile := filepath.Join(webDir, "index.html")
@@ -264,4 +270,9 @@ func setupRoutes(r *gin.Engine) {
 
 func (s *Server) Run(addr string) error {
 	return s.engine.Run(addr)
+}
+
+func retiredAgentExchange(c *gin.Context) {
+	c.Header("Cache-Control", "no-store")
+	c.JSON(410, gin.H{"error": "代理换码功能已关闭"})
 }
