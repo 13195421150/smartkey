@@ -95,12 +95,12 @@ describe('redemption safety and recovery', () => {
 
   it('requires explicit account confirmation and clears credentials after preflight', async () => {
     const requests = await prepareConfirmation(async () => reply({ code: 0, data: { status: 'queued' } }, 202))
-    expect(button('确认并开始兑换').attributes('disabled')).toBeDefined()
+    expect(button('确定兑换').attributes('disabled')).toBeDefined()
     expect((wrapper!.find('#redeem-session').element as HTMLTextAreaElement).value).toBe('')
-    await button('确认并开始兑换').trigger('click')
+    await button('确定兑换').trigger('click')
     expect(requests).toHaveLength(0)
     await wrapper!.find('#confirm-account').setValue(true)
-    await button('确认并开始兑换').trigger('click')
+    await button('确定兑换').trigger('click')
     await flushPromises()
     expect(requests).toHaveLength(1)
     expect(wrapper!.text()).toContain('等待对账')
@@ -110,8 +110,8 @@ describe('redemption safety and recovery', () => {
   it('uses the same identifier when retrying a rejected submission', async () => {
     const requests = await prepareConfirmation(async () => reply({ msg: '请求校验未通过' }, 400))
     await wrapper!.find('#confirm-account').setValue(true)
-    await button('确认并开始兑换').trigger('click'); await flushPromises()
-    await button('确认并开始兑换').trigger('click'); await flushPromises()
+    await button('确定兑换').trigger('click'); await flushPromises()
+    await button('确定兑换').trigger('click'); await flushPromises()
     expect(requests).toHaveLength(2)
     expect(JSON.parse(String(requests[0].body)).client_request_id).toBe(JSON.parse(String(requests[1].body)).client_request_id)
   })
@@ -119,7 +119,7 @@ describe('redemption safety and recovery', () => {
   it('does not resubmit after a network failure and restores the original order on reload', async () => {
     const requests = await prepareConfirmation(async () => { throw new TypeError('offline') })
     await wrapper!.find('#confirm-account').setValue(true)
-    await button('确认并开始兑换').trigger('click'); await flushPromises()
+    await button('确定兑换').trigger('click'); await flushPromises()
     expect(requests).toHaveLength(1)
     const saved = JSON.parse(sessionStorage.getItem('cdk_redeem_progress_v1')!)
     expect(saved.step).toBe(4)
